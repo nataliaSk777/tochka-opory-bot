@@ -18,62 +18,46 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
-// Мини-HTTP (health). Railway перестаёт прибивать контейнер SIGTERM.
-const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('ok');
-}).listen(PORT, () => console.log('HTTP listening on', PORT));
+// ✅ Мини-HTTP (health): Railway любит, когда порт слушается
+const PORT = Number(process.env.PORT || 3000);
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('ok');
+  })
+  .listen(PORT, () => console.log('HTTP listening on', PORT));
 
 console.log('BOOT', new Date().toISOString());
 
 const bot = new Telegraf(BOT_TOKEN);
 
 async function safeAnswerCbQuery(ctx) {
-  try { await ctx.answerCbQuery(); } catch (_) {}
+  try {
+    await ctx.answerCbQuery();
+  } catch (_) {}
 }
 
 /* ============================================================================
-   UI
+   Texts
 ============================================================================ */
-
-function mainKeyboard(u) {
-  const buttons = [];
-
-  if (!u || u.programType === 'none') {
-    buttons.push([Markup.button.callback('Начать первую неделю', 'START_FREE')]);
-  } else if (u.programType === 'free') {
-    buttons.push([Markup.button.callback('Остановить программу', 'STOP')]);
-  } else if (u.programType === 'paid') {
-    buttons.push([Markup.button.callback('Остановить программу', 'STOP')]);
-  } else if (u.programType === 'support') {
-    buttons.push([Markup.button.callback('Остановить поддержку', 'STOP')]);
-  }
-
-  // Важно: переход/продление только через «Подписка»
-  buttons.push([Markup.button.callback('🔒 Подписка', 'SUB_INFO')]);
-  buttons.push([Markup.button.callback('Что это?', 'ABOUT')]);
-
-  return Markup.inlineKeyboard(buttons);
-}
 
 function startText() {
   return [
-  '«Точка опоры» — это мягкая работа через тело,',
-  'чтобы внутри становилось спокойнее и устойчивее.',
-  '',
-  'Утром в 7:30 (по Москве) — 1–2 минуты через тело.',
-  'Вечером в 20:30 — короткий вопрос-якорь.',
-  '',
-  'Сначала — первая неделя.',
-  'Потом — 30 дней глубже.',
-  'После — поддержка 3 раза в неделю.'
-].join('\n');
+    'Привет.',
+    'Это «Точка опоры».',
+    '',
+    'Если хочется, чтобы внутри стало чуть легче — можем начать с первой недели.',
+    'Утром — короткая опора, вечером — мягкое завершение дня.',
+    'Сообщения приходят в 7:30 и 20:30 по московскому времени.',
+    '',
+    'Можно просто попробовать и посмотреть, подходит ли тебе такой формат.'
+  ].join('\n');
 }
 
 function aboutText() {
   return [
-    '«Точка опоры» — это мягкая телесная регуляция.',
+    '«Точка опоры» — это мягкая работа через тело,',
+    'чтобы внутри становилось спокойнее и устойчивее.',
     '',
     'Утром в 7:30 (по Москве) — 1–2 минуты через тело.',
     'Вечером в 20:30 — короткий вопрос-якорь.',
@@ -85,8 +69,6 @@ function aboutText() {
 }
 
 function subscriptionText(u) {
-  // Здесь мы соблюдаем твой выбор: показываем “переход” только через кнопку «Подписка».
-  // Если неделя закончилась, даём мягкое приглашение продолжить.
   const weekFinished = (u && u.programType === 'free' && Number(u.currentDay) >= 7);
 
   if (u && u.programType === 'paid') {
@@ -126,6 +108,30 @@ function subscriptionText(u) {
   ].join('\n');
 }
 
+/* ============================================================================
+   UI
+============================================================================ */
+
+function mainKeyboard(u) {
+  const buttons = [];
+
+  if (!u || u.programType === 'none') {
+    buttons.push([Markup.button.callback('Начать первую неделю', 'START_FREE')]);
+  } else if (u.programType === 'free') {
+    // Важно: НЕ показываем “Перейти на 30 дней” здесь — только через «🔒 Подписка»
+    buttons.push([Markup.button.callback('Остановить программу', 'STOP')]);
+  } else if (u.programType === 'paid') {
+    buttons.push([Markup.button.callback('Остановить программу', 'STOP')]);
+  } else if (u.programType === 'support') {
+    buttons.push([Markup.button.callback('Остановить поддержку', 'STOP')]);
+  }
+
+  buttons.push([Markup.button.callback('🔒 Подписка', 'SUB_INFO')]);
+  buttons.push([Markup.button.callback('Что это?', 'ABOUT')]);
+
+  return Markup.inlineKeyboard(buttons);
+}
+
 function subscriptionKeyboard(u) {
   const weekFinished = (u && u.programType === 'free' && Number(u.currentDay) >= 7);
 
@@ -136,8 +142,15 @@ function subscriptionKeyboard(u) {
     ]);
   }
 
-  // Если неделя ещё идёт — не продаём.
   return mainKeyboard(u);
+}
+
+/* ============================================================================
+   Helpers
+============================================================================ */
+
+function getOrCreateUser(chatId) {
+  return getUser(chatId) || ensureUser(chatId);
 }
 
 /* ============================================================================
@@ -151,32 +164,30 @@ bot.start(async (ctx) => {
 });
 
 bot.action('ABOUT', async (ctx) => {
-  const u = getUser(ctx.chat.id) || ensureUser(ctx.chat.id);
+  const u = getOrCreateUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
   await ctx.reply(aboutText(), mainKeyboard(u));
 });
 
 bot.action('SUB_INFO', async (ctx) => {
-  const u = getUser(ctx.chat.id) || ensureUser(ctx.chat.id);
+  const u = getOrCreateUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
   await ctx.reply(subscriptionText(u), subscriptionKeyboard(u));
 });
 
-bot.action('SUB_LATER', async (ctx) => {
-  const u = getUser(ctx.chat.id) || ensureUser(ctx.chat.id);
+// Одинаковая логика “пока не сейчас” (и из меню, и из cron-офферов)
+async function handleLater(ctx) {
+  const u = getOrCreateUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
   await ctx.reply('Хорошо. Можно вернуться к этому в любой момент через «🔒 Подписка».', mainKeyboard(u));
-});
+}
 
-bot.action('NO_THANKS', async (ctx) => {
-  const u = getUser(ctx.chat.id) || ensureUser(ctx.chat.id);
-  await (async () => { try { await ctx.answerCbQuery(); } catch (_) {} })();
-  await ctx.reply('Хорошо. Можно вернуться к этому в любой момент через «🔒 Подписка».', mainKeyboard(u));
-});
+bot.action('SUB_LATER', handleLater);
+bot.action('NO_THANKS', handleLater);
 
 bot.action('START_FREE', async (ctx) => {
   const chatId = ctx.chat.id;
-  const u = getUser(chatId) || ensureUser(chatId);
+  const u = getOrCreateUser(chatId);
 
   u.isActive = true;
   u.programType = 'free';
@@ -189,7 +200,13 @@ bot.action('START_FREE', async (ctx) => {
 
   await safeAnswerCbQuery(ctx);
   await ctx.reply(
-    'Хорошо.\n\nЗавтра в 7:30 придёт первое утреннее сообщение.\nСегодня можно просто опустить плечи и сделать длинный выдох.\nЭтого достаточно.',
+    [
+      'Хорошо.',
+      '',
+      'Завтра в 7:30 придёт первое утреннее сообщение.',
+      'Сегодня можно просто опустить плечи и сделать длинный выдох.',
+      'Этого достаточно.'
+    ].join('\n'),
     mainKeyboard(u)
   );
 });
@@ -197,11 +214,11 @@ bot.action('START_FREE', async (ctx) => {
 bot.action('BUY_30', async (ctx) => {
   // MVP: “покупка” кнопкой. Реальную оплату подключим отдельно.
   const chatId = ctx.chat.id;
-  const u = getUser(chatId) || ensureUser(chatId);
+  const u = getOrCreateUser(chatId);
 
   u.isActive = true;
   u.programType = 'paid';
-  u.currentDay = 8; // старт платной части
+  u.currentDay = 8; // старт платной части (после 7 дней)
   u.supportStep = 1;
   u.lastMorningSentKey = null;
   u.lastEveningSentKey = null;
@@ -210,14 +227,20 @@ bot.action('BUY_30', async (ctx) => {
 
   await safeAnswerCbQuery(ctx);
   await ctx.reply(
-    'Хорошо.\n\nТы в 30 днях.\nЗавтра в 7:30 придёт день 8.\nИдём глубже, но всё так же мягко — через тело.',
+    [
+      'Хорошо.',
+      '',
+      'Ты в 30 днях.',
+      'Завтра в 7:30 придёт день 8.',
+      'Идём глубже, но всё так же мягко — через тело.'
+    ].join('\n'),
     mainKeyboard(u)
   );
 });
 
 bot.action('START_SUPPORT', async (ctx) => {
   const chatId = ctx.chat.id;
-  const u = getUser(chatId) || ensureUser(chatId);
+  const u = getOrCreateUser(chatId);
 
   u.isActive = true;
   u.programType = 'support';
@@ -229,14 +252,19 @@ bot.action('START_SUPPORT', async (ctx) => {
 
   await safeAnswerCbQuery(ctx);
   await ctx.reply(
-    'Поддержка включена.\n\n3 раза в неделю — короткое возвращение к телу.\nВ 7:30 и 20:30 по Москве.',
+    [
+      'Поддержка включена.',
+      '',
+      '3 раза в неделю — короткое возвращение к телу.',
+      'В 7:30 и 20:30 по Москве.'
+    ].join('\n'),
     mainKeyboard(u)
   );
 });
 
 bot.action('STOP', async (ctx) => {
   const chatId = ctx.chat.id;
-  const u = getUser(chatId) || ensureUser(chatId);
+  const u = getOrCreateUser(chatId);
 
   u.isActive = false;
   upsertUser(u);
