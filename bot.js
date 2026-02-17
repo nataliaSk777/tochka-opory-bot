@@ -168,6 +168,12 @@ bot.action('SUB_LATER', async (ctx) => {
   await ctx.reply('Хорошо. Можно вернуться к этому в любой момент через «🔒 Подписка».', mainKeyboard(u));
 });
 
+bot.action('NO_THANKS', async (ctx) => {
+  const u = getUser(ctx.chat.id) || ensureUser(ctx.chat.id);
+  await (async () => { try { await ctx.answerCbQuery(); } catch (_) {} })();
+  await ctx.reply('Хорошо. Можно вернуться к этому в любой момент через «🔒 Подписка».', mainKeyboard(u));
+});
+
 bot.action('START_FREE', async (ctx) => {
   const chatId = ctx.chat.id;
   const u = getUser(chatId) || ensureUser(chatId);
