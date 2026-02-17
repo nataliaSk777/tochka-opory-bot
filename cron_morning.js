@@ -12,21 +12,28 @@ if (!BOT_TOKEN) {
   console.error('BOT_TOKEN is required');
   process.exit(1);
 }
+
 const bot = new Telegraf(BOT_TOKEN);
 
 function shouldSend(u, key) {
-  return u.isActive && u.lastMorningSentKey !== key;
+  return Boolean(u && u.isActive && u.lastMorningSentKey !== key);
 }
 
 function advanceAfterMorning(u) {
+  if (!u) return;
+
   if (u.programType === 'free') {
-    if (u.currentDay < 7) u.currentDay += 1;
+    if (Number(u.currentDay || 1) < 7) u.currentDay = Number(u.currentDay || 1) + 1;
+    return;
   }
+
   if (u.programType === 'paid') {
-    if (u.currentDay < 35) u.currentDay += 1;
+    if (Number(u.currentDay || 8) < 35) u.currentDay = Number(u.currentDay || 8) + 1;
+    return;
   }
+
   if (u.programType === 'support') {
-    u.supportStep = Math.max(1, (u.supportStep || 1) + 1);
+    u.supportStep = Math.max(1, Number(u.supportStep || 1) + 1);
   }
 }
 
@@ -35,7 +42,9 @@ async function main() {
   const key = dateKey(parts);
 
   if (!isTime(parts, 7, 30)) {
-    console.log(`[morning] ${FIXED_TZ} now ${parts.hh}:${String(parts.mm).padStart(2,'0')} skip`);
+    console.log(
+      `[morning] ${FIXED_TZ} now ${parts.hh}:${String(parts.mm).padStart(2, '0')} skip`
+    );
     return;
   }
 
@@ -47,7 +56,10 @@ async function main() {
       if (!u || !u.isActive) continue;
       if (!shouldSend(u, key)) continue;
 
+      // support — только в “дни поддержки”
       if (u.programType === 'support' && !isSupportDay(parts)) continue;
+
+      // programType none — ничего не отправляем
       if (u.programType === 'none') continue;
 
       const text = getMorningText(u.programType, u.currentDay, u.supportStep);
@@ -57,9 +69,13 @@ async function main() {
 
       u.lastMorningSentKey = key;
 
-      // ВАЖНО: в free на дне 7 не продвигаем автоматически в paid
-      // В paid на дне 35 не переводим автоматически в support — это отдельное приглашение вечером.
-      if (!((u.programType === 'free' && u.currentDay === 7) || (u.programType === 'paid' && u.currentDay === 35))) {
+      // ВАЖНО: free на дне 7 не переводим автоматически в paid
+      // ВАЖНО: paid на дне 35 не переводим автоматически в support
+      const isBoundary =
+        (u.programType === 'free' && Number(u.currentDay) === 7) ||
+        (u.programType === 'paid' && Number(u.currentDay) === 35);
+
+      if (!isBoundary) {
         advanceAfterMorning(u);
       }
 
@@ -73,4 +89,9 @@ async function main() {
   console.log(`[morning] sent=${sent}`);
 }
 
-main().then(() => process.exit(0));
+main()
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error('[morning] fatal', e && e.message ? e.message : e);
+    process.exit(1);
+  });
