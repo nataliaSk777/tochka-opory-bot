@@ -248,6 +248,96 @@ bot.command('dbtest', async (ctx) => {
     await ctx.reply(`❌ DB test error: ${e && e.message ? e.message : String(e)}`);
   }
 });
+function reviewKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('📝 Написать отзыв', 'REVIEW_WRITE')],
+    [Markup.button.callback('Позже', 'REVIEW_LATER')]
+  ]);
+}
+
+bot.action('REVIEW_LATER', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+  await ctx.reply('Хорошо. Если захочешь — можно будет написать позже.');
+});
+
+bot.action('REVIEW_WRITE', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+  const u = await store.ensureUser(ctx.chat.id);
+  u.awaitingReview = true;
+  await store.upsertUser(u);
+
+  await ctx.reply(
+    [
+      'Напиши, пожалуйста, в нескольких словах:',
+      'что ты заметила за эти дни?',
+      '',
+      'Можно одним сообщением.',
+      'Без “правильно/неправильно”.'
+    ].join('\n'),
+    reviewKeyboard()
+  );
+});
+
+// ловим текст отзыва
+bot.on('text', async (ctx, next) => {
+  try {
+    if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
+
+    const text = ctx.message.text.trim();
+    if (!text) return next();
+
+    // команды/стопы не считаем отзывом
+    if (text.startsWith('/')) return next();
+    if (/^стоп$/i.test(text)) return next();
+
+    const u = await store.getUser(ctx.chat.id);
+    if (!u || !u.awaitingReview) return next();
+
+    // снимаем флаг ожидания
+    u.awaitingReview = false;
+    await store.upsertUser(u);
+
+    // сохраняем отзыв
+    const id = await store.addReview({
+      chatId: u.chatId,
+      text,
+      programType: u.programType,
+      currentDay: u.currentDay
+    });
+
+    await ctx.reply('Спасибо. Я сохранила. 🫶');
+
+    // шлём тебе в личку (если OWNER_CHAT_ID задан)
+    const ownerIdRaw = process.env.OWNER_CHAT_ID;
+    const ownerId = ownerIdRaw ? Number(ownerIdRaw) : NaN;
+
+    if (Number.isFinite(ownerId)) {
+      const msg = [
+        '📝 Новый отзыв',
+        `id: ${id != null ? id : 'null'}`,
+        `chatId: ${u.chatId}`,
+        `type: ${u.programType || 'none'}`,
+        `day: ${u.currentDay != null ? u.currentDay : '-'}`,
+        '',
+        text
+      ].join('\n');
+
+      try { await bot.telegram.sendMessage(ownerId, msg); } catch (_) {}
+    }
+
+    return;
+  } catch (e) {
+    console.error('[review] handler error', e && e.message ? e.message : e);
+    return next();
+  }
+});
+
+bot.command('reviews_count', async (ctx) => {
+  if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
+  const n = await store.countReviews();
+  return ctx.reply(`Отзывы в базе: ${n}`);
+});
+
 
 bot.command('stats', async (ctx) => {
   if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
