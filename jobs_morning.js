@@ -28,7 +28,7 @@ function advanceAfterMorning(u) {
 
 async function runMorning(bot) {
   const parts = getPartsInTz(new Date());
-  const key = dateKey(parts);
+  const key = dateKey(parts); // ключ дня в твоём TZ (например, '2026-02-19')
 
   const users = await store.listUsers();
   let sent = 0;
@@ -44,7 +44,19 @@ async function runMorning(bot) {
       const text = getMorningText(u.programType, u.currentDay, u.supportStep);
       if (!text) continue;
 
+      // ✅ ЖЁСТКАЯ защита от дублей на уровне БД:
+      // если рассылку запустит второй процесс / рестарт / ручной тик —
+      // второй раз в этот день для этого chatId уже не пройдёт.
+      if (typeof store.claimDelivery === 'function') {
+        const ok = await store.claimDelivery(u.chatId, 'morning', key);
+        if (!ok) continue;
+      }
+
       await bot.telegram.sendMessage(u.chatId, text);
+
+      if (typeof store.markDeliverySent === 'function') {
+        await store.markDeliverySent(u.chatId, 'morning', key);
+      }
 
       u.lastMorningSentKey = key;
 
@@ -62,6 +74,12 @@ async function runMorning(bot) {
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       console.error('[morning] send error', u && u.chatId, msg);
+
+      if (typeof store.markDeliveryError === 'function') {
+        try {
+          await store.markDeliveryError(u && u.chatId, 'morning', key, msg);
+        } catch (_) {}
+      }
 
       if (u && (msg.includes('blocked by the user') || msg.includes('chat not found'))) {
         u.isActive = false;
