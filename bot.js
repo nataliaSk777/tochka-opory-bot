@@ -216,33 +216,38 @@ bot.command('debug_users', async (ctx) => {
   }
 });
 bot.command('dbtest', async (ctx) => {
-  const chatId = ctx.chat.id;
+  try {
+    if (!ctx.chat) return ctx.reply('Не удалось определить chat.id');
+    const chatId = ctx.chat.id;
 
-  // 1) создаём/получаем пользователя
-  const before = getUser(chatId) || ensureUser(chatId);
+    // 1) создаём/получаем пользователя
+    const before = (await store.getUser(chatId)) || (await store.ensureUser(chatId));
 
-  // 2) пишем "маркер" в БД
-  before.dbTestCounter = Number(before.dbTestCounter || 0) + 1;
-  before.dbTestLastAt = new Date().toISOString();
-  upsertUser(before);
+    // 2) пишем "маркер" в БД
+    before.dbTestCounter = Number(before.dbTestCounter || 0) + 1;
+    before.dbTestLastAt = new Date().toISOString();
+    await store.upsertUser(before);
 
-  // 3) читаем обратно из БД
-  const after = getUser(chatId);
+    // 3) читаем обратно из БД
+    const after = await store.getUser(chatId);
 
-  await ctx.reply(
-    [
-      '✅ DB test',
-      '',
-      `chatId: ${chatId}`,
-      `before.counter: ${Number((before && before.dbTestCounter) || 0) - 0}`,
-      `after.counter: ${after ? after.dbTestCounter : 'null'}`,
-      `after.lastAt: ${after ? after.dbTestLastAt : 'null'}`,
-      '',
-      after ? '✅ Пользователь читается из базы.' : '❌ Пользователь НЕ читается из базы.'
-    ].join('\n')
-  );
+    await ctx.reply(
+      [
+        '✅ DB test',
+        '',
+        `chatId: ${chatId}`,
+        `before.counter: ${before ? before.dbTestCounter : 'null'}`,
+        `after.counter: ${after ? after.dbTestCounter : 'null'}`,
+        `after.lastAt: ${after ? after.dbTestLastAt : 'null'}`,
+        '',
+        after ? '✅ Пользователь читается из базы.' : '❌ Пользователь НЕ читается из базы.'
+      ].join('\n')
+    );
+  } catch (e) {
+    console.error('[dbtest] error', e && e.message ? e.message : e);
+    await ctx.reply(`❌ DB test error: ${e && e.message ? e.message : String(e)}`);
+  }
 });
-
 /* ============================================================================
    Handlers
 ============================================================================ */
