@@ -13,6 +13,7 @@ const pool = new Pool({
 });
 
 async function init() {
+  // users
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       chat_id BIGINT PRIMARY KEY,
@@ -22,18 +23,42 @@ async function init() {
       support_step INT NOT NULL DEFAULT 1,
       last_morning_sent_key TEXT,
       last_evening_sent_key TEXT,
-
-      -- debug /dbtest
-      db_test_counter INT NOT NULL DEFAULT 0,
-      db_test_last_at TIMESTAMPTZ,
-
+      paid_until TIMESTAMPTZ,
+      last_payment_id TEXT,
+      awaiting_review BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
-  // На случай, если таблица уже была создана раньше без этих колонок:
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS db_test_counter INT NOT NULL DEFAULT 0;`);
-  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS db_test_last_at TIMESTAMPTZ;`);
+  // миграции на случай старой таблицы
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_payment_id TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_review BOOLEAN NOT NULL DEFAULT FALSE;`);
+
+  // deliveries (защита от дублей + “одноразовые” события типа просьбы об отзыве)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS deliveries (
+      chat_id BIGINT NOT NULL,
+      kind TEXT NOT NULL,          -- 'morning' | 'evening' | 'review_ask' | ...
+      send_key TEXT NOT NULL,      -- например '2026-02-19'
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      sent_at TIMESTAMPTZ,
+      error TEXT,
+      PRIMARY KEY (chat_id, kind, send_key)
+    );
+  `);
+
+  // reviews
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reviews (
+      id BIGSERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      text TEXT NOT NULL,
+      program_type TEXT,
+      current_day INT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 }
 
 function rowToUser(r) {
@@ -45,18 +70,14 @@ function rowToUser(r) {
     supportStep: Number(r.support_step),
     lastMorningSentKey: r.last_morning_sent_key,
     lastEveningSentKey: r.last_evening_sent_key,
-
-    // debug /dbtest
-    dbTestCounter: Number(r.db_test_counter || 0),
-    dbTestLastAt: r.db_test_last_at ? String(r.db_test_last_at) : null
+    paidUntil: r.paid_until ? new Date(r.paid_until).toISOString() : null,
+    lastPaymentId: r.last_payment_id || null,
+    awaitingReview: !!r.awaiting_review
   };
 }
 
 async function getUser(chatId) {
-  const res = await pool.query(
-    `SELECT * FROM users WHERE chat_id = $1`,
-    [String(chatId)]
-  );
+  const res = await pool.query(`SELECT * FROM users WHERE chat_id = $1`, [String(chatId)]);
   if (!res.rows.length) return null;
   return rowToUser(res.rows[0]);
 }
@@ -64,18 +85,11 @@ async function getUser(chatId) {
 async function upsertUser(u) {
   await pool.query(
     `INSERT INTO users (
-       chat_id,
-       is_active,
-       program_type,
-       current_day,
-       support_step,
-       last_morning_sent_key,
-       last_evening_sent_key,
-       db_test_counter,
-       db_test_last_at,
-       updated_at
+        chat_id, is_active, program_type, current_day, support_step,
+        last_morning_sent_key, last_evening_sent_key, paid_until, last_payment_id,
+        awaiting_review, updated_at
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
      ON CONFLICT (chat_id) DO UPDATE SET
        is_active = EXCLUDED.is_active,
        program_type = EXCLUDED.program_type,
@@ -83,8 +97,9 @@ async function upsertUser(u) {
        support_step = EXCLUDED.support_step,
        last_morning_sent_key = EXCLUDED.last_morning_sent_key,
        last_evening_sent_key = EXCLUDED.last_evening_sent_key,
-       db_test_counter = EXCLUDED.db_test_counter,
-       db_test_last_at = EXCLUDED.db_test_last_at,
+       paid_until = EXCLUDED.paid_until,
+       last_payment_id = EXCLUDED.last_payment_id,
+       awaiting_review = EXCLUDED.awaiting_review,
        updated_at = NOW()`,
     [
       String(u.chatId),
@@ -94,10 +109,9 @@ async function upsertUser(u) {
       Number(u.supportStep || 1),
       u.lastMorningSentKey || null,
       u.lastEveningSentKey || null,
-
-      // debug /dbtest
-      Number(u.dbTestCounter || 0),
-      u.dbTestLastAt ? new Date(u.dbTestLastAt) : null
+      u.paidUntil ? new Date(u.paidUntil) : null,
+      u.lastPaymentId || null,
+      !!u.awaitingReview
     ]
   );
   return u;
@@ -120,45 +134,75 @@ async function ensureUser(chatId) {
     supportStep: 1,
     lastMorningSentKey: null,
     lastEveningSentKey: null,
-
-    dbTestCounter: 0,
-    dbTestLastAt: null
+    paidUntil: null,
+    lastPaymentId: null,
+    awaitingReview: false
   };
 
   await upsertUser(u);
   return u;
 }
-async function getDeliveryStatsByDay(sendKey) {
+
+/**
+ * Защита от дублей/повторов событий: вернёт true, если “забронировали” событие.
+ */
+async function claimDelivery(chatId, kind, sendKey) {
   const res = await pool.query(
-    `
-    SELECT
-      kind,
-      COUNT(*)::int AS total,
-      SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END)::int AS sent,
-      SUM(CASE WHEN error IS NOT NULL AND error <> '' THEN 1 ELSE 0 END)::int AS errors
-    FROM deliveries
-    WHERE send_key = $1
-    GROUP BY kind
-    ORDER BY kind
-    `,
-    [String(sendKey)]
+    `INSERT INTO deliveries (chat_id, kind, send_key)
+     VALUES ($1,$2,$3)
+     ON CONFLICT DO NOTHING`,
+    [String(chatId), String(kind), String(sendKey)]
   );
-
-  const byKind = {};
-  for (const r of res.rows) {
-    byKind[String(r.kind)] = {
-      total: Number(r.total || 0),
-      sent: Number(r.sent || 0),
-      errors: Number(r.errors || 0)
-    };
-  }
-
-  // Суммарно
-  const totalAll = Object.values(byKind).reduce((a, x) => a + (x.total || 0), 0);
-  const sentAll = Object.values(byKind).reduce((a, x) => a + (x.sent || 0), 0);
-  const errorsAll = Object.values(byKind).reduce((a, x) => a + (x.errors || 0), 0);
-
-  return { sendKey, byKind, totalAll, sentAll, errorsAll };
+  return res.rowCount === 1;
 }
 
-module.exports = { init, getUser, upsertUser, listUsers, ensureUser, getDeliveryStatsByDay };
+async function markDeliverySent(chatId, kind, sendKey) {
+  await pool.query(
+    `UPDATE deliveries
+     SET sent_at = NOW(), error = NULL
+     WHERE chat_id = $1 AND kind = $2 AND send_key = $3`,
+    [String(chatId), String(kind), String(sendKey)]
+  );
+}
+
+async function markDeliveryError(chatId, kind, sendKey, errorText) {
+  await pool.query(
+    `UPDATE deliveries
+     SET error = $4
+     WHERE chat_id = $1 AND kind = $2 AND send_key = $3`,
+    [String(chatId), String(kind), String(sendKey), String(errorText || 'error')]
+  );
+}
+
+async function addReview({ chatId, text, programType, currentDay }) {
+  const res = await pool.query(
+    `INSERT INTO reviews (chat_id, text, program_type, current_day)
+     VALUES ($1,$2,$3,$4)
+     RETURNING id`,
+    [
+      String(chatId),
+      String(text || '').trim(),
+      programType ? String(programType) : null,
+      currentDay != null ? Number(currentDay) : null
+    ]
+  );
+  return res.rows && res.rows[0] ? Number(res.rows[0].id) : null;
+}
+
+async function countReviews() {
+  const res = await pool.query(`SELECT COUNT(*)::int AS c FROM reviews`);
+  return res.rows && res.rows[0] ? Number(res.rows[0].c) : 0;
+}
+
+module.exports = {
+  init,
+  getUser,
+  upsertUser,
+  listUsers,
+  ensureUser,
+  claimDelivery,
+  markDeliverySent,
+  markDeliveryError,
+  addReview,
+  countReviews
+};
