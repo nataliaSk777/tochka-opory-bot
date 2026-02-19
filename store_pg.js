@@ -22,9 +22,18 @@ async function init() {
       support_step INT NOT NULL DEFAULT 1,
       last_morning_sent_key TEXT,
       last_evening_sent_key TEXT,
+
+      -- debug /dbtest
+      db_test_counter INT NOT NULL DEFAULT 0,
+      db_test_last_at TIMESTAMPTZ,
+
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  // На случай, если таблица уже была создана раньше без этих колонок:
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS db_test_counter INT NOT NULL DEFAULT 0;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS db_test_last_at TIMESTAMPTZ;`);
 }
 
 function rowToUser(r) {
@@ -35,7 +44,11 @@ function rowToUser(r) {
     currentDay: Number(r.current_day),
     supportStep: Number(r.support_step),
     lastMorningSentKey: r.last_morning_sent_key,
-    lastEveningSentKey: r.last_evening_sent_key
+    lastEveningSentKey: r.last_evening_sent_key,
+
+    // debug /dbtest
+    dbTestCounter: Number(r.db_test_counter || 0),
+    dbTestLastAt: r.db_test_last_at ? String(r.db_test_last_at) : null
   };
 }
 
@@ -50,8 +63,19 @@ async function getUser(chatId) {
 
 async function upsertUser(u) {
   await pool.query(
-    `INSERT INTO users (chat_id, is_active, program_type, current_day, support_step, last_morning_sent_key, last_evening_sent_key, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+    `INSERT INTO users (
+       chat_id,
+       is_active,
+       program_type,
+       current_day,
+       support_step,
+       last_morning_sent_key,
+       last_evening_sent_key,
+       db_test_counter,
+       db_test_last_at,
+       updated_at
+     )
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
      ON CONFLICT (chat_id) DO UPDATE SET
        is_active = EXCLUDED.is_active,
        program_type = EXCLUDED.program_type,
@@ -59,6 +83,8 @@ async function upsertUser(u) {
        support_step = EXCLUDED.support_step,
        last_morning_sent_key = EXCLUDED.last_morning_sent_key,
        last_evening_sent_key = EXCLUDED.last_evening_sent_key,
+       db_test_counter = EXCLUDED.db_test_counter,
+       db_test_last_at = EXCLUDED.db_test_last_at,
        updated_at = NOW()`,
     [
       String(u.chatId),
@@ -67,7 +93,11 @@ async function upsertUser(u) {
       Number(u.currentDay || 1),
       Number(u.supportStep || 1),
       u.lastMorningSentKey || null,
-      u.lastEveningSentKey || null
+      u.lastEveningSentKey || null,
+
+      // debug /dbtest
+      Number(u.dbTestCounter || 0),
+      u.dbTestLastAt ? new Date(u.dbTestLastAt) : null
     ]
   );
   return u;
@@ -89,7 +119,10 @@ async function ensureUser(chatId) {
     currentDay: 1,
     supportStep: 1,
     lastMorningSentKey: null,
-    lastEveningSentKey: null
+    lastEveningSentKey: null,
+
+    dbTestCounter: 0,
+    dbTestLastAt: null
   };
 
   await upsertUser(u);
