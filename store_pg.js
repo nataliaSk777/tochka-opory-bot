@@ -128,5 +128,37 @@ async function ensureUser(chatId) {
   await upsertUser(u);
   return u;
 }
+async function getDeliveryStatsByDay(sendKey) {
+  const res = await pool.query(
+    `
+    SELECT
+      kind,
+      COUNT(*)::int AS total,
+      SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END)::int AS sent,
+      SUM(CASE WHEN error IS NOT NULL AND error <> '' THEN 1 ELSE 0 END)::int AS errors
+    FROM deliveries
+    WHERE send_key = $1
+    GROUP BY kind
+    ORDER BY kind
+    `,
+    [String(sendKey)]
+  );
 
-module.exports = { init, getUser, upsertUser, listUsers, ensureUser };
+  const byKind = {};
+  for (const r of res.rows) {
+    byKind[String(r.kind)] = {
+      total: Number(r.total || 0),
+      sent: Number(r.sent || 0),
+      errors: Number(r.errors || 0)
+    };
+  }
+
+  // Суммарно
+  const totalAll = Object.values(byKind).reduce((a, x) => a + (x.total || 0), 0);
+  const sentAll = Object.values(byKind).reduce((a, x) => a + (x.sent || 0), 0);
+  const errorsAll = Object.values(byKind).reduce((a, x) => a + (x.errors || 0), 0);
+
+  return { sendKey, byKind, totalAll, sentAll, errorsAll };
+}
+
+module.exports = { init, getUser, upsertUser, listUsers, ensureUser, getDeliveryStatsByDay };
