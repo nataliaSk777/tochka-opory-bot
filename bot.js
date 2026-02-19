@@ -215,6 +215,7 @@ bot.command('debug_users', async (ctx) => {
     await ctx.reply(lines.slice(i, i + chunkSize).join('\n'));
   }
 });
+
 bot.command('dbtest', async (ctx) => {
   try {
     if (!ctx.chat) return ctx.reply('Не удалось определить chat.id');
@@ -248,6 +249,11 @@ bot.command('dbtest', async (ctx) => {
     await ctx.reply(`❌ DB test error: ${e && e.message ? e.message : String(e)}`);
   }
 });
+
+/* ============================================================================
+   Reviews (A + текст + 1 мягкое напоминание)
+============================================================================ */
+
 function reviewKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('📝 Написать отзыв', 'REVIEW_WRITE')],
@@ -255,13 +261,21 @@ function reviewKeyboard() {
   ]);
 }
 
+// “Позже” для отзывов: ставим флаг, чтобы jobs_morning.js мог мягко напомнить (на 6-й день)
 bot.action('REVIEW_LATER', async (ctx) => {
   await safeAnswerCbQuery(ctx);
-  await ctx.reply('Хорошо. Если захочешь — можно будет написать позже.');
+
+  const u = await store.ensureUser(ctx.chat.id);
+  u.reviewPostponed = true;   // важно для одного напоминания
+  u.awaitingReview = false;   // на всякий случай сбросим ожидание
+  await store.upsertUser(u);
+
+  await ctx.reply('Хорошо. Я мягко напомню чуть позже. 🫶', mainKeyboard(u));
 });
 
 bot.action('REVIEW_WRITE', async (ctx) => {
   await safeAnswerCbQuery(ctx);
+
   const u = await store.ensureUser(ctx.chat.id);
   u.awaitingReview = true;
   await store.upsertUser(u);
@@ -293,8 +307,9 @@ bot.on('text', async (ctx, next) => {
     const u = await store.getUser(ctx.chat.id);
     if (!u || !u.awaitingReview) return next();
 
-    // снимаем флаг ожидания
+    // снимаем флаги ожидания + отложенности
     u.awaitingReview = false;
+    u.reviewPostponed = false;
     await store.upsertUser(u);
 
     // сохраняем отзыв
@@ -338,6 +353,9 @@ bot.command('reviews_count', async (ctx) => {
   return ctx.reply(`Отзывы в базе: ${n}`);
 });
 
+/* ============================================================================
+   Admin stats / manual ticks
+============================================================================ */
 
 bot.command('stats', async (ctx) => {
   if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
@@ -441,6 +459,7 @@ bot.command('deliveries', async (ctx) => {
     return ctx.reply(`❌ deliveries error: ${e && e.message ? e.message : String(e)}`);
   }
 });
+
 /* ============================================================================
    Handlers
 ============================================================================ */
