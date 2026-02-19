@@ -1,5 +1,6 @@
 'use strict';
 
+const { Markup } = require('telegraf');
 const store = require('./store_pg');
 const { getMorningText } = require('./content');
 const { getPartsInTz, dateKey, isSupportDay, FIXED_TZ } = require('./time');
@@ -26,9 +27,38 @@ function advanceAfterMorning(u) {
   }
 }
 
+function reviewKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('📝 Написать отзыв', 'REVIEW_WRITE')],
+    [Markup.button.callback('Позже', 'REVIEW_LATER')]
+  ]);
+}
+
+async function maybeAskReview(bot, u, key) {
+  // просим отзыв на 4-й день free (после отправки сообщения)
+  if (!u || !u.isActive) return;
+  if (u.programType !== 'free') return;
+  if (Number(u.currentDay) !== 4) return;
+
+  const ok = await store.claimDelivery(u.chatId, 'review_ask', key);
+  if (!ok) return;
+
+  const text = [
+    'Можно я попрошу пару слов?',
+    '',
+    'Если за эти дни стало хоть чуть спокойнее,',
+    'или внимание стало чаще возвращаться в тело —',
+    'напиши, пожалуйста, коротко, что ты заметила.',
+    '',
+    'Мне это очень ценно.'
+  ].join('\n');
+
+  await bot.telegram.sendMessage(u.chatId, text, reviewKeyboard());
+}
+
 async function runMorning(bot) {
   const parts = getPartsInTz(new Date());
-  const key = dateKey(parts); // ключ дня в твоём TZ (например, '2026-02-19')
+  const key = dateKey(parts);
 
   const users = await store.listUsers();
   let sent = 0;
@@ -41,22 +71,23 @@ async function runMorning(bot) {
       if (u.programType === 'support' && !isSupportDay(parts)) continue;
       if (u.programType === 'none') continue;
 
-      const text = getMorningText(u.programType, u.currentDay, u.supportStep);
-      if (!text) continue;
-
-      // ✅ ЖЁСТКАЯ защита от дублей на уровне БД:
-      // если рассылку запустит второй процесс / рестарт / ручной тик —
-      // второй раз в этот день для этого chatId уже не пройдёт.
+      // защита от дублей на уровне БД (если включена)
       if (typeof store.claimDelivery === 'function') {
         const ok = await store.claimDelivery(u.chatId, 'morning', key);
         if (!ok) continue;
       }
+
+      const text = getMorningText(u.programType, u.currentDay, u.supportStep);
+      if (!text) continue;
 
       await bot.telegram.sendMessage(u.chatId, text);
 
       if (typeof store.markDeliverySent === 'function') {
         await store.markDeliverySent(u.chatId, 'morning', key);
       }
+
+      // после успешной отправки — можем попросить отзыв (один раз)
+      await maybeAskReview(bot, u, key);
 
       u.lastMorningSentKey = key;
 
@@ -69,16 +100,13 @@ async function runMorning(bot) {
       await store.upsertUser(u);
       sent += 1;
 
-      // маленькая пауза против лимитов
       await new Promise((r) => setTimeout(r, 40));
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       console.error('[morning] send error', u && u.chatId, msg);
 
       if (typeof store.markDeliveryError === 'function') {
-        try {
-          await store.markDeliveryError(u && u.chatId, 'morning', key, msg);
-        } catch (_) {}
+        try { await store.markDeliveryError(u && u.chatId, 'morning', key, msg); } catch (_) {}
       }
 
       if (u && (msg.includes('blocked by the user') || msg.includes('chat not found'))) {
