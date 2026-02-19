@@ -65,14 +65,14 @@ async function runEvening(bot) {
       if (u.programType === 'support' && !isSupportDay(parts)) continue;
       if (u.programType === 'none') continue;
 
-      const text = getEveningText(u.programType, u.currentDay, u.supportStep);
-      if (!text) continue;
-
-      // 🔒 Жёсткая защита от дублей
+      // защита от дублей
       if (typeof store.claimDelivery === 'function') {
         const ok = await store.claimDelivery(u.chatId, 'evening', key);
         if (!ok) continue;
       }
+
+      const text = getEveningText(u.programType, u.currentDay, u.supportStep);
+      if (!text) continue;
 
       await bot.telegram.sendMessage(u.chatId, text);
 
@@ -98,9 +98,7 @@ async function runEvening(bot) {
       console.error('[evening] send error', u && u.chatId, msg);
 
       if (typeof store.markDeliveryError === 'function') {
-        try {
-          await store.markDeliveryError(u && u.chatId, 'evening', key, msg);
-        } catch (_) {}
+        try { await store.markDeliveryError(u && u.chatId, 'evening', key, msg); } catch (_) {}
       }
 
       if (u && (msg.includes('blocked by the user') || msg.includes('chat not found'))) {
