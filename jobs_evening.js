@@ -1,8 +1,7 @@
 'use strict';
 
 const { Markup } = require('telegraf');
-
-const { listUsers, upsertUser } = require('./store');
+const store = require('./store_pg');
 const { getEveningText } = require('./content');
 const { getPartsInTz, dateKey, isSupportDay, FIXED_TZ } = require('./time');
 
@@ -10,12 +9,7 @@ function shouldSend(u, key) {
   return Boolean(u && u.isActive && u.lastEveningSentKey !== key);
 }
 
-/* ============================================================================
-   Keyboards
-============================================================================ */
-
 function upgradeKeyboard() {
-  // Важно: после 7 дней не ведём напрямую на BUY_30, а мягко отправляем в «Подписка»
   return Markup.inlineKeyboard([
     [Markup.button.callback('🔒 Подписка', 'SUB_INFO')],
     [Markup.button.callback('Пока не сейчас', 'SUB_LATER')]
@@ -28,10 +22,6 @@ function supportKeyboard() {
     [Markup.button.callback('Пока не сейчас', 'SUB_LATER')]
   ]);
 }
-
-/* ============================================================================
-   Offers
-============================================================================ */
 
 async function sendOfferAfterFree7(bot, chatId) {
   const text = [
@@ -60,15 +50,11 @@ async function sendOfferAfterPaid35(bot, chatId) {
   await bot.telegram.sendMessage(chatId, text, supportKeyboard());
 }
 
-/* ============================================================================
-   Main job
-============================================================================ */
-
 async function runEvening(bot) {
   const parts = getPartsInTz(new Date());
   const key = dateKey(parts);
 
-  const users = listUsers();
+  const users = await store.listUsers();
   let sent = 0;
 
   for (const u of users) {
@@ -76,10 +62,7 @@ async function runEvening(bot) {
       if (!u || !u.isActive) continue;
       if (!shouldSend(u, key)) continue;
 
-      // support — только в “дни поддержки”
       if (u.programType === 'support' && !isSupportDay(parts)) continue;
-
-      // programType none — ничего не отправляем
       if (u.programType === 'none') continue;
 
       const text = getEveningText(u.programType, u.currentDay, u.supportStep);
@@ -88,20 +71,26 @@ async function runEvening(bot) {
       await bot.telegram.sendMessage(u.chatId, text);
 
       u.lastEveningSentKey = key;
-      upsertUser(u);
+      await store.upsertUser(u);
       sent += 1;
 
-      // Оффер после 7 дней free: мягко → «Подписка»
       if (u.programType === 'free' && Number(u.currentDay) === 7) {
         await sendOfferAfterFree7(bot, u.chatId);
       }
 
-      // Оффер после 35 дней paid: предложить поддержку
       if (u.programType === 'paid' && Number(u.currentDay) === 35) {
         await sendOfferAfterPaid35(bot, u.chatId);
       }
+
+      await new Promise((r) => setTimeout(r, 40));
     } catch (e) {
-      console.error('[evening] send error', u && u.chatId, e && e.message ? e.message : e);
+      const msg = e && e.message ? e.message : String(e);
+      console.error('[evening] send error', u && u.chatId, msg);
+
+      if (u && (msg.includes('blocked by the user') || msg.includes('chat not found'))) {
+        u.isActive = false;
+        await store.upsertUser(u);
+      }
     }
   }
 
