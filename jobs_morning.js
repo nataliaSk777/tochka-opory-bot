@@ -1,6 +1,6 @@
 'use strict';
 
-const { listUsers, upsertUser } = require('./store');
+const store = require('./store_pg');
 const { getMorningText } = require('./content');
 const { getPartsInTz, dateKey, isSupportDay, FIXED_TZ } = require('./time');
 
@@ -30,7 +30,7 @@ async function runMorning(bot) {
   const parts = getPartsInTz(new Date());
   const key = dateKey(parts);
 
-  const users = listUsers();
+  const users = await store.listUsers();
   let sent = 0;
 
   for (const u of users) {
@@ -38,10 +38,7 @@ async function runMorning(bot) {
       if (!u || !u.isActive) continue;
       if (!shouldSend(u, key)) continue;
 
-      // support — только в “дни поддержки”
       if (u.programType === 'support' && !isSupportDay(parts)) continue;
-
-      // programType none — ничего не отправляем
       if (u.programType === 'none') continue;
 
       const text = getMorningText(u.programType, u.currentDay, u.supportStep);
@@ -55,14 +52,21 @@ async function runMorning(bot) {
         (u.programType === 'free' && Number(u.currentDay) === 7) ||
         (u.programType === 'paid' && Number(u.currentDay) === 35);
 
-      if (!isBoundary) {
-        advanceAfterMorning(u);
-      }
+      if (!isBoundary) advanceAfterMorning(u);
 
-      upsertUser(u);
+      await store.upsertUser(u);
       sent += 1;
+
+      // маленькая пауза против лимитов
+      await new Promise((r) => setTimeout(r, 40));
     } catch (e) {
-      console.error('[morning] send error', u && u.chatId, e && e.message ? e.message : e);
+      const msg = e && e.message ? e.message : String(e);
+      console.error('[morning] send error', u && u.chatId, msg);
+
+      if (u && (msg.includes('blocked by the user') || msg.includes('chat not found'))) {
+        u.isActive = false;
+        await store.upsertUser(u);
+      }
     }
   }
 
