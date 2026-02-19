@@ -283,6 +283,28 @@ bot.command('stats', async (ctx) => {
 
   return ctx.reply(msg);
 });
+
+bot.command('tick_morning', async (ctx) => {
+  if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
+  await ctx.reply('⏳ Запускаю runMorning(bot)...');
+  try {
+    await runMorning(bot);
+    await ctx.reply('✅ Готово. Посмотри, пришло ли сообщение и что в логах.');
+  } catch (e) {
+    await ctx.reply(`❌ Ошибка: ${e && e.message ? e.message : e}`);
+  }
+});
+
+bot.command('tick_evening', async (ctx) => {
+  if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
+  await ctx.reply('⏳ Запускаю runEvening(bot)...');
+  try {
+    await runEvening(bot);
+    await ctx.reply('✅ Готово. Посмотри, пришло ли сообщение и что в логах.');
+  } catch (e) {
+    await ctx.reply(`❌ Ошибка: ${e && e.message ? e.message : e}`);
+  }
+});
 /* ============================================================================
    Handlers
 ============================================================================ */
