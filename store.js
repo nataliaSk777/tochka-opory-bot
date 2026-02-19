@@ -3,10 +3,18 @@
 const fs = require('fs');
 const path = require('path');
 
-const STORE_PATH = path.join(__dirname, 'program_store.json');
+const STORE_DIR = process.env.STORE_DIR || __dirname;
+const STORE_PATH = path.join(STORE_DIR, 'program_store.json');
+
+function ensureDir() {
+  try {
+    fs.mkdirSync(STORE_DIR, { recursive: true });
+  } catch (_) {}
+}
 
 function load() {
   try {
+    ensureDir();
     if (!fs.existsSync(STORE_PATH)) return { users: {} };
     const raw = fs.readFileSync(STORE_PATH, 'utf8');
     const data = JSON.parse(raw);
@@ -19,6 +27,7 @@ function load() {
 }
 
 function save(data) {
+  ensureDir();
   fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), 'utf8');
 }
 
@@ -46,15 +55,9 @@ function ensureUser(chatId) {
   const u = {
     chatId,
     isActive: true,
-
-    // programType: 'none' | 'free' | 'paid' | 'support'
     programType: 'none',
-
-    // currentDay: free 1..7, paid 8..35, supportDayCounter 1..∞ (циклим контент)
     currentDay: 1,
     supportStep: 1,
-
-    // чтобы не слать 2 раза в один день
     lastMorningSentKey: null,
     lastEveningSentKey: null
   };
