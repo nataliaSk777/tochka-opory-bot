@@ -56,6 +56,33 @@ async function maybeAskReview(bot, u, key) {
   await bot.telegram.sendMessage(u.chatId, text, reviewKeyboard());
 }
 
+async function maybeRemindReview(bot, u, key) {
+  // одно мягкое напоминание тем, кто нажал “Позже”
+  if (!u || !u.isActive) return;
+  if (u.programType !== 'free') return;
+  if (!u.reviewPostponed) return;
+  if (Number(u.currentDay) !== 6) return;
+
+  const ok = await store.claimDelivery(u.chatId, 'review_ask_remind', key);
+  if (!ok) return;
+
+  const text = [
+    'Я обещала напомнить мягко — напоминаю.',
+    '',
+    'Если за эти дни стало хоть чуть спокойнее',
+    'или ты стала лучше слышать себя —',
+    'напиши пару слов, пожалуйста.',
+    '',
+    'Это помогает мне делать «Точку опоры» точнее.'
+  ].join('\n');
+
+  await bot.telegram.sendMessage(u.chatId, text, reviewKeyboard());
+
+  // чтобы напоминание было только один раз
+  u.reviewPostponed = false;
+  await store.upsertUser(u);
+}
+
 async function runMorning(bot) {
   const parts = getPartsInTz(new Date());
   const key = dateKey(parts);
@@ -71,7 +98,7 @@ async function runMorning(bot) {
       if (u.programType === 'support' && !isSupportDay(parts)) continue;
       if (u.programType === 'none') continue;
 
-      // защита от дублей на уровне БД (если включена)
+      // защита от дублей на уровне БД
       if (typeof store.claimDelivery === 'function') {
         const ok = await store.claimDelivery(u.chatId, 'morning', key);
         if (!ok) continue;
@@ -88,6 +115,9 @@ async function runMorning(bot) {
 
       // после успешной отправки — можем попросить отзыв (один раз)
       await maybeAskReview(bot, u, key);
+
+      // и можем один раз мягко напомнить на 6-й день (если откладывали)
+      await maybeRemindReview(bot, u, key);
 
       u.lastMorningSentKey = key;
 
