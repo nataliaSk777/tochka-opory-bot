@@ -305,6 +305,52 @@ bot.command('tick_evening', async (ctx) => {
     await ctx.reply(`❌ Ошибка: ${e && e.message ? e.message : e}`);
   }
 });
+
+function moscowDayKey(d = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(d);
+  const y = parts.find(p => p.type === 'year').value;
+  const m = parts.find(p => p.type === 'month').value;
+  const day = parts.find(p => p.type === 'day').value;
+  return `${y}-${m}-${day}`;
+}
+
+bot.command('deliveries', async (ctx) => {
+  if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
+
+  const key = moscowDayKey();
+
+  try {
+    if (typeof store.getDeliveryStatsByDay !== 'function') {
+      return ctx.reply('❌ store.getDeliveryStatsByDay не найден. Проверь store_pg.js');
+    }
+
+    const s = await store.getDeliveryStatsByDay(key);
+
+    const m = s.byKind.morning || { total: 0, sent: 0, errors: 0 };
+    const e = s.byKind.evening || { total: 0, sent: 0, errors: 0 };
+
+    const msg = [
+      '📦 Доставки за сегодня (Москва)',
+      '',
+      `День: ${s.sendKey}`,
+      '',
+      `🌅 morning: total=${m.total} | sent=${m.sent} | errors=${m.errors}`,
+      `🌙 evening: total=${e.total} | sent=${e.sent} | errors=${e.errors}`,
+      '',
+      `Итого: total=${s.totalAll} | sent=${s.sentAll} | errors=${s.errorsAll}`
+    ].join('\n');
+
+    return ctx.reply(msg);
+  } catch (e) {
+    console.error('[deliveries] error', e);
+    return ctx.reply(`❌ deliveries error: ${e && e.message ? e.message : String(e)}`);
+  }
+});
 /* ============================================================================
    Handlers
 ============================================================================ */
