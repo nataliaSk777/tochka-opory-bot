@@ -248,6 +248,41 @@ bot.command('dbtest', async (ctx) => {
     await ctx.reply(`❌ DB test error: ${e && e.message ? e.message : String(e)}`);
   }
 });
+
+bot.command('stats', async (ctx) => {
+  if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
+
+  const users = await store.listUsers();
+
+  const total = users.length;
+  const active = users.filter(u => u && u.isActive).length;
+
+  const byType = { free: 0, paid: 0, support: 0, none: 0, other: 0 };
+  for (const u of users) {
+    const t = (u && u.programType) ? String(u.programType) : 'none';
+    if (t === 'free') byType.free += 1;
+    else if (t === 'paid') byType.paid += 1;
+    else if (t === 'support') byType.support += 1;
+    else if (t === 'none') byType.none += 1;
+    else byType.other += 1;
+  }
+
+  const msg = [
+    '📊 Статистика',
+    '',
+    `Всего пользователей: ${total}`,
+    `Активных: ${active}`,
+    '',
+    'По типам:',
+    `— free: ${byType.free}`,
+    `— paid: ${byType.paid}`,
+    `— support: ${byType.support}`,
+    `— none: ${byType.none}`,
+    byType.other ? `— other: ${byType.other}` : null
+  ].filter(Boolean).join('\n');
+
+  return ctx.reply(msg);
+});
 /* ============================================================================
    Handlers
 ============================================================================ */
