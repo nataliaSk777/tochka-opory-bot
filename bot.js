@@ -215,6 +215,33 @@ bot.command('debug_users', async (ctx) => {
     await ctx.reply(lines.slice(i, i + chunkSize).join('\n'));
   }
 });
+bot.command('dbtest', async (ctx) => {
+  const chatId = ctx.chat.id;
+
+  // 1) создаём/получаем пользователя
+  const before = getUser(chatId) || ensureUser(chatId);
+
+  // 2) пишем "маркер" в БД
+  before.dbTestCounter = Number(before.dbTestCounter || 0) + 1;
+  before.dbTestLastAt = new Date().toISOString();
+  upsertUser(before);
+
+  // 3) читаем обратно из БД
+  const after = getUser(chatId);
+
+  await ctx.reply(
+    [
+      '✅ DB test',
+      '',
+      `chatId: ${chatId}`,
+      `before.counter: ${Number((before && before.dbTestCounter) || 0) - 0}`,
+      `after.counter: ${after ? after.dbTestCounter : 'null'}`,
+      `after.lastAt: ${after ? after.dbTestLastAt : 'null'}`,
+      '',
+      after ? '✅ Пользователь читается из базы.' : '❌ Пользователь НЕ читается из базы.'
+    ].join('\n')
+  );
+});
 
 /* ============================================================================
    Handlers
