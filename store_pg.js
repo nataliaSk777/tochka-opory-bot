@@ -26,6 +26,7 @@ async function init() {
       paid_until TIMESTAMPTZ,
       last_payment_id TEXT,
       awaiting_review BOOLEAN NOT NULL DEFAULT FALSE,
+      review_postponed BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
@@ -34,6 +35,7 @@ async function init() {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_payment_id TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_review BOOLEAN NOT NULL DEFAULT FALSE;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS review_postponed BOOLEAN NOT NULL DEFAULT FALSE;`);
 
   // deliveries (защита от дублей + “одноразовые” события типа просьбы об отзыве)
   await pool.query(`
@@ -72,7 +74,8 @@ function rowToUser(r) {
     lastEveningSentKey: r.last_evening_sent_key,
     paidUntil: r.paid_until ? new Date(r.paid_until).toISOString() : null,
     lastPaymentId: r.last_payment_id || null,
-    awaitingReview: !!r.awaiting_review
+    awaitingReview: !!r.awaiting_review,
+    reviewPostponed: !!r.review_postponed
   };
 }
 
@@ -87,9 +90,9 @@ async function upsertUser(u) {
     `INSERT INTO users (
         chat_id, is_active, program_type, current_day, support_step,
         last_morning_sent_key, last_evening_sent_key, paid_until, last_payment_id,
-        awaiting_review, updated_at
+        awaiting_review, review_postponed, updated_at
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
      ON CONFLICT (chat_id) DO UPDATE SET
        is_active = EXCLUDED.is_active,
        program_type = EXCLUDED.program_type,
@@ -100,6 +103,7 @@ async function upsertUser(u) {
        paid_until = EXCLUDED.paid_until,
        last_payment_id = EXCLUDED.last_payment_id,
        awaiting_review = EXCLUDED.awaiting_review,
+       review_postponed = EXCLUDED.review_postponed,
        updated_at = NOW()`,
     [
       String(u.chatId),
@@ -111,7 +115,8 @@ async function upsertUser(u) {
       u.lastEveningSentKey || null,
       u.paidUntil ? new Date(u.paidUntil) : null,
       u.lastPaymentId || null,
-      !!u.awaitingReview
+      !!u.awaitingReview,
+      !!u.reviewPostponed
     ]
   );
   return u;
@@ -136,7 +141,8 @@ async function ensureUser(chatId) {
     lastEveningSentKey: null,
     paidUntil: null,
     lastPaymentId: null,
-    awaitingReview: false
+    awaitingReview: false,
+    reviewPostponed: false
   };
 
   await upsertUser(u);
@@ -175,13 +181,16 @@ async function markDeliveryError(chatId, kind, sendKey, errorText) {
 }
 
 async function addReview({ chatId, text, programType, currentDay }) {
+  const clean = String(text || '').trim();
+  if (!clean) return null;
+
   const res = await pool.query(
     `INSERT INTO reviews (chat_id, text, program_type, current_day)
      VALUES ($1,$2,$3,$4)
      RETURNING id`,
     [
       String(chatId),
-      String(text || '').trim(),
+      clean,
       programType ? String(programType) : null,
       currentDay != null ? Number(currentDay) : null
     ]
