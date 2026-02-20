@@ -30,7 +30,7 @@ http
   })
   .listen(PORT, () => console.log('HTTP listening on', PORT));
 
-console.log('BOOT', new Date().toISOString());
+console.log('BOOT', new Date().toISOString(), 'tzOffsetMin=', new Date().getTimezoneOffset());
 
 const bot = new Telegraf(BOT_TOKEN);
 
@@ -48,6 +48,48 @@ function isOwnerStrict(ctx) {
   const ownerId = Number(ownerIdRaw);
   if (!Number.isFinite(ownerId)) return false;
   return !!(ctx && ctx.chat && ctx.chat.id === ownerId);
+}
+
+/* ============================================================================
+   Moscow time helpers (stable on Railway)
+============================================================================ */
+
+const MOSCOW_TZ = 'Europe/Moscow';
+
+function moscowParts(d = new Date()) {
+  // Returns: { key:'YYYY-MM-DD', hour, minute, second, isoLike:'YYYY-MM-DD HH:mm:ss' }
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: MOSCOW_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(d);
+
+  const get = (t) => {
+    const p = parts.find(x => x.type === t);
+    return p ? p.value : null;
+  };
+
+  const y = get('year');
+  const m = get('month');
+  const day = get('day');
+  const hour = Number(get('hour'));
+  const minute = Number(get('minute'));
+  const second = Number(get('second'));
+
+  const key = `${y}-${m}-${day}`;
+  const isoLike = `${key} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`;
+
+  return { key, hour, minute, second, isoLike };
+}
+
+function moscowDayKey(d = new Date()) {
+  const p = moscowParts(d);
+  return p.key;
 }
 
 /* ============================================================================
@@ -221,15 +263,12 @@ bot.command('dbtest', async (ctx) => {
     if (!ctx.chat) return ctx.reply('Не удалось определить chat.id');
     const chatId = ctx.chat.id;
 
-    // 1) создаём/получаем пользователя
     const before = (await store.getUser(chatId)) || (await store.ensureUser(chatId));
 
-    // 2) пишем "маркер" в БД
     before.dbTestCounter = Number(before.dbTestCounter || 0) + 1;
     before.dbTestLastAt = new Date().toISOString();
     await store.upsertUser(before);
 
-    // 3) читаем обратно из БД
     const after = await store.getUser(chatId);
 
     await ctx.reply(
@@ -261,13 +300,12 @@ function reviewKeyboard() {
   ]);
 }
 
-// “Позже” для отзывов: ставим флаг, чтобы jobs_morning.js мог мягко напомнить (на 6-й день)
 bot.action('REVIEW_LATER', async (ctx) => {
   await safeAnswerCbQuery(ctx);
 
   const u = await store.ensureUser(ctx.chat.id);
-  u.reviewPostponed = true;   // важно для одного напоминания
-  u.awaitingReview = false;   // на всякий случай сбросим ожидание
+  u.reviewPostponed = true;
+  u.awaitingReview = false;
   await store.upsertUser(u);
 
   await ctx.reply('Хорошо. Я мягко напомню чуть позже. 🫶', mainKeyboard(u));
@@ -292,7 +330,6 @@ bot.action('REVIEW_WRITE', async (ctx) => {
   );
 });
 
-// ловим текст отзыва
 bot.on('text', async (ctx, next) => {
   try {
     if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
@@ -300,19 +337,16 @@ bot.on('text', async (ctx, next) => {
     const text = ctx.message.text.trim();
     if (!text) return next();
 
-    // команды/стопы не считаем отзывом
     if (text.startsWith('/')) return next();
     if (/^стоп$/i.test(text)) return next();
 
     const u = await store.getUser(ctx.chat.id);
     if (!u || !u.awaitingReview) return next();
 
-    // снимаем флаги ожидания + отложенности
     u.awaitingReview = false;
     u.reviewPostponed = false;
     await store.upsertUser(u);
 
-    // сохраняем отзыв
     const id = await store.addReview({
       chatId: u.chatId,
       text,
@@ -322,7 +356,6 @@ bot.on('text', async (ctx, next) => {
 
     await ctx.reply('Спасибо. Я сохранила. 🫶');
 
-    // шлём тебе в личку (если OWNER_CHAT_ID задан)
     const ownerIdRaw = process.env.OWNER_CHAT_ID;
     const ownerId = ownerIdRaw ? Number(ownerIdRaw) : NaN;
 
@@ -413,19 +446,6 @@ bot.command('tick_evening', async (ctx) => {
     await ctx.reply(`❌ Ошибка: ${e && e.message ? e.message : e}`);
   }
 });
-
-function moscowDayKey(d = new Date()) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Moscow',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).formatToParts(d);
-  const y = parts.find(p => p.type === 'year').value;
-  const m = parts.find(p => p.type === 'month').value;
-  const day = parts.find(p => p.type === 'day').value;
-  return `${y}-${m}-${day}`;
-}
 
 bot.command('deliveries', async (ctx) => {
   if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
@@ -562,8 +582,132 @@ bot.command('stop', async (ctx) => stopProgram(ctx));
 bot.hears(/^стоп$/i, async (ctx) => stopProgram(ctx));
 
 /* ============================================================================
+   Scheduler (cron + watchdog + catch-up)
+============================================================================ */
+
+let morningRunning = false;
+let eveningRunning = false;
+
+// Чтобы не дёргать runMorning/runEvening по сто раз в одном дне,
+// держим in-memory ключ запуска. Идём от московского дня.
+let lastMorningRunKey = null;
+let lastEveningRunKey = null;
+
+// Окна и догонялки (МСК)
+const MORNING_HOUR = 7;
+const MORNING_MINUTE = 30;
+const EVENING_HOUR = 20;
+const EVENING_MINUTE = 30;
+
+const WINDOW_MINUTES = 2;     // 07:30..07:32 и 20:30..20:32
+const MORNING_CATCHUP_END_HOUR = 11; // после рестарта — можно догнать до 11:59
+const EVENING_CATCHUP_END_HOUR = 23; // можно догнать до 23:59
+
+async function safeRunMorning(source) {
+  const p = moscowParts(new Date());
+  const runKey = p.key;
+
+  if (morningRunning) return;
+
+  // Не запускаем второй раз в тот же день из планировщика (у пользователей всё равно есть lastMorningSentKey,
+  // но нам важно не создавать лишнюю нагрузку).
+  if (lastMorningRunKey === runKey) return;
+
+  try {
+    morningRunning = true;
+    lastMorningRunKey = runKey;
+    console.log(`[scheduler] MORNING fire (${source}) msk=${p.isoLike} key=${runKey}`);
+    await runMorning(bot);
+    console.log(`[scheduler] MORNING done (${source}) msk=${p.isoLike} key=${runKey}`);
+  } catch (e) {
+    // если упало — разрешим повторную попытку этим же днём
+    lastMorningRunKey = null;
+    console.error('[scheduler] MORNING error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+  } finally {
+    morningRunning = false;
+  }
+}
+
+async function safeRunEvening(source) {
+  const p = moscowParts(new Date());
+  const runKey = p.key;
+
+  if (eveningRunning) return;
+  if (lastEveningRunKey === runKey) return;
+
+  try {
+    eveningRunning = true;
+    lastEveningRunKey = runKey;
+    console.log(`[scheduler] EVENING fire (${source}) msk=${p.isoLike} key=${runKey}`);
+    await runEvening(bot);
+    console.log(`[scheduler] EVENING done (${source}) msk=${p.isoLike} key=${runKey}`);
+  } catch (e) {
+    lastEveningRunKey = null;
+    console.error('[scheduler] EVENING error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+  } finally {
+    eveningRunning = false;
+  }
+}
+
+function isInWindow(p, targetHour, targetMinute) {
+  if (p.hour !== targetHour) return false;
+  return p.minute >= targetMinute && p.minute <= (targetMinute + WINDOW_MINUTES);
+}
+
+function isAfterTargetSameDay(p, targetHour, targetMinute) {
+  if (p.hour > targetHour) return true;
+  if (p.hour < targetHour) return false;
+  return p.minute >= targetMinute;
+}
+
+function startWatchdogScheduler() {
+  console.log('[scheduler] watchdog started (20s interval), tz=', MOSCOW_TZ);
+
+  const tick = async () => {
+    const p = moscowParts(new Date());
+
+    // Утро: окно 07:30..07:32
+    const morningWindow = isInWindow(p, MORNING_HOUR, MORNING_MINUTE);
+
+    // Утро: догонялка после рестарта — если уже после 07:30, но ещё до 11:59
+    const morningCatchup =
+      isAfterTargetSameDay(p, MORNING_HOUR, MORNING_MINUTE) &&
+      p.hour <= MORNING_CATCHUP_END_HOUR;
+
+    if ((morningWindow || morningCatchup) && lastMorningRunKey !== p.key) {
+      await safeRunMorning(morningWindow ? 'watchdog-window' : 'watchdog-catchup');
+    }
+
+    // Вечер: окно 20:30..20:32
+    const eveningWindow = isInWindow(p, EVENING_HOUR, EVENING_MINUTE);
+
+    // Вечер: догонялка — если уже после 20:30, но ещё до 23:59
+    const eveningCatchup =
+      isAfterTargetSameDay(p, EVENING_HOUR, EVENING_MINUTE) &&
+      p.hour <= EVENING_CATCHUP_END_HOUR;
+
+    if ((eveningWindow || eveningCatchup) && lastEveningRunKey !== p.key) {
+      await safeRunEvening(eveningWindow ? 'watchdog-window' : 'watchdog-catchup');
+    }
+  };
+
+  const t = setInterval(() => {
+    tick().catch((e) => console.error('[scheduler] watchdog tick error', e && e.message ? e.message : e));
+  }, 20000);
+
+  // первый тик сразу после старта (для догонялки после рестарта)
+  tick().catch((e) => console.error('[scheduler] watchdog first tick error', e && e.message ? e.message : e));
+
+  return () => clearInterval(t);
+}
+
+/* ============================================================================
    Launch + Scheduler
 ============================================================================ */
+
+let stopWatchdog = null;
+let morningTask = null;
+let eveningTask = null;
 
 async function boot() {
   await store.init();
@@ -571,29 +715,45 @@ async function boot() {
   await bot.launch();
   console.log('BOT: launched');
 
-  cron.schedule('30 7 * * *', async () => {
-    try {
-      console.log('[scheduler] morning tick');
-      await runMorning(bot);
-    } catch (e) {
-      console.error('[scheduler] morning error', e && e.message ? e.message : e);
-    }
-  }, { timezone: 'Europe/Moscow' });
+  // node-cron (основной “ровный” запуск)
+  morningTask = cron.schedule(
+    '30 7 * * *',
+    async () => { await safeRunMorning('node-cron'); },
+    { timezone: MOSCOW_TZ }
+  );
 
-  cron.schedule('30 20 * * *', async () => {
-    try {
-      console.log('[scheduler] evening tick');
-      await runEvening(bot);
-    } catch (e) {
-      console.error('[scheduler] evening error', e && e.message ? e.message : e);
-    }
-  }, { timezone: 'Europe/Moscow' });
+  eveningTask = cron.schedule(
+    '30 20 * * *',
+    async () => { await safeRunEvening('node-cron'); },
+    { timezone: MOSCOW_TZ }
+  );
+
+  console.log('[scheduler] node-cron scheduled: morning 07:30, evening 20:30 (MSK)');
+
+  // watchdog (страховка: окно + догонялка)
+  stopWatchdog = startWatchdogScheduler();
+
+  // полезный лог “где мы сейчас” по Москве
+  const p = moscowParts(new Date());
+  console.log('[scheduler] now MSK:', p.isoLike, 'dayKey=', p.key);
 }
 
 boot().catch((e) => {
-  console.error('BOOT FAILED:', e && e.message ? e.message : e);
+  console.error('BOOT FAILED:', e && e.stack ? e.stack : (e && e.message ? e.message : e));
   process.exit(1);
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+process.once('SIGINT', () => {
+  try { if (morningTask) morningTask.stop(); } catch (_) {}
+  try { if (eveningTask) eveningTask.stop(); } catch (_) {}
+  try { if (stopWatchdog) stopWatchdog(); } catch (_) {}
+});
+
+process.once('SIGTERM', () => {
+  try { if (morningTask) morningTask.stop(); } catch (_) {}
+  try { if (eveningTask) eveningTask.stop(); } catch (_) {}
+  try { if (stopWatchdog) stopWatchdog(); } catch (_) {}
+});
