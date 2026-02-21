@@ -5,6 +5,10 @@ const http = require('http');
 const cron = require('node-cron');
 const { Telegraf, Markup } = require('telegraf');
 
+// ✅ YooKassa
+const YooKassa = require('yookassa');
+const crypto = require('crypto');
+
 const store = require('./store_pg');
 const { runMorning } = require('./jobs_morning');
 const { runEvening } = require('./jobs_evening');
@@ -22,11 +26,226 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
+// ✅ YooKassa env (для оплаты 30 дней)
+const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID;
+const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
+
+// Базовый URL сервиса (Railway домен), нужен для return_url
+const BASE_URL = process.env.BASE_URL;
+
+// Цена 30 дней (в RUB). Можно переопределить в env.
+const PRICE_30_RUB = String(process.env.PRICE_30_RUB || '299.00');
+
+// Опциональная защита webhook через Basic Auth
+const YOOKASSA_WEBHOOK_USER = process.env.YOOKASSA_WEBHOOK_USER || '';
+const YOOKASSA_WEBHOOK_PASS = process.env.YOOKASSA_WEBHOOK_PASS || '';
+
+const yooKassa = (YOOKASSA_SHOP_ID && YOOKASSA_SECRET_KEY)
+  ? new YooKassa({ shopId: YOOKASSA_SHOP_ID, secretKey: YOOKASSA_SECRET_KEY })
+  : null;
+
+function havePaymentsEnabled() {
+  return !!(yooKassa && BASE_URL);
+}
+
+function parseBasicAuth(req) {
+  const h = req.headers && req.headers.authorization ? String(req.headers.authorization) : '';
+  if (!h.startsWith('Basic ')) return null;
+  const raw = Buffer.from(h.slice(6), 'base64').toString('utf8');
+  const idx = raw.indexOf(':');
+  if (idx < 0) return null;
+  return { user: raw.slice(0, idx), pass: raw.slice(idx + 1) };
+}
+
+function checkWebhookAuth(req) {
+  // Если логин/пароль не заданы — не требуем auth (удобно на старте)
+  if (!YOOKASSA_WEBHOOK_USER && !YOOKASSA_WEBHOOK_PASS) return true;
+
+  const creds = parseBasicAuth(req);
+  if (!creds) return false;
+  return creds.user === YOOKASSA_WEBHOOK_USER && creds.pass === YOOKASSA_WEBHOOK_PASS;
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk) => {
+      data += chunk;
+      // мягкий лимит на размер
+      if (data.length > 1024 * 1024) {
+        reject(new Error('Body too large'));
+      }
+    });
+    req.on('end', () => {
+      if (!data) return resolve(null);
+      try {
+        resolve(JSON.parse(data));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function makeIdempotencyKey() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+async function createPayment30Days(chatId) {
+  if (!havePaymentsEnabled()) {
+    throw new Error('Payments not configured: set YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY, BASE_URL');
+  }
+
+  const idempotencyKey = makeIdempotencyKey();
+
+  const payment = await yooKassa.createPayment(
+    {
+      amount: { value: PRICE_30_RUB, currency: 'RUB' },
+      capture: true,
+      confirmation: {
+        type: 'redirect',
+        return_url: `${BASE_URL.replace(/\/$/, '')}/success`
+      },
+      description: 'Точка опоры — 30 дней',
+      metadata: {
+        plan: 'paid_30',
+        chatId: String(chatId)
+      }
+    },
+    idempotencyKey
+  );
+
+  const url = payment && payment.confirmation ? payment.confirmation.confirmation_url : null;
+  const paymentId = payment && payment.id ? String(payment.id) : null;
+
+  if (!url || !paymentId) {
+    throw new Error('Failed to create payment: missing confirmation_url or payment.id');
+  }
+
+  return { url, paymentId };
+}
+
 const PORT = Number(process.env.PORT || 3000);
+
+// ✅ HTTP server: healthcheck + webhook + success page
 http
-  .createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('ok');
+  .createServer(async (req, res) => {
+    try {
+      const method = String(req.method || 'GET').toUpperCase();
+      const url = String(req.url || '/');
+
+      // Webhook endpoint
+      if (method === 'POST' && url.startsWith('/yookassa-webhook')) {
+        if (!checkWebhookAuth(req)) {
+          res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('unauthorized');
+          return;
+        }
+
+        const event = await readJsonBody(req);
+
+        // Всегда отвечаем 200, если смогли разобрать запрос (ЮKassa ждёт 200)
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('ok');
+
+        // Обработка события после ответа
+        try {
+          if (!event || !event.event || !event.object) return;
+
+          if (event.event === 'payment.succeeded') {
+            const payment = event.object;
+            const meta = payment && payment.metadata ? payment.metadata : {};
+            const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
+            const plan = meta.plan != null ? String(meta.plan) : '';
+
+            if (!chatIdRaw) return;
+            const chatId = Number(chatIdRaw);
+            if (!Number.isFinite(chatId)) return;
+
+            if (plan === 'paid_30') {
+              const u = await store.ensureUser(chatId);
+
+              // идемпотентность: если уже paid/support — не дёргаем
+              if (u && u.programType !== 'paid') {
+                u.isActive = true;
+                u.programType = 'paid';
+                u.currentDay = 8;
+                u.supportStep = 1;
+                u.lastMorningSentKey = null;
+                u.lastEveningSentKey = null;
+
+                // чистим ожидание оплаты
+                u.pendingPaymentId = null;
+                u.pendingPlan = null;
+
+                await store.upsertUser(u);
+
+                try {
+                  await bot.telegram.sendMessage(
+                    chatId,
+                    [
+                      '✅ Оплата прошла.',
+                      '',
+                      'Ты в 30 днях.',
+                      'Завтра в 7:30 придёт день 8.',
+                      'Идём глубже, но всё так же мягко — через тело.'
+                    ].join('\n'),
+                    mainKeyboard(u)
+                  );
+                } catch (_) {}
+              } else if (u) {
+                // всё равно чистим pending, если вдруг висело
+                u.pendingPaymentId = null;
+                u.pendingPlan = null;
+                await store.upsertUser(u);
+              }
+            }
+          }
+
+          if (event.event === 'payment.canceled') {
+            const payment = event.object;
+            const meta = payment && payment.metadata ? payment.metadata : {};
+            const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
+            const plan = meta.plan != null ? String(meta.plan) : '';
+
+            if (!chatIdRaw) return;
+            const chatId = Number(chatIdRaw);
+            if (!Number.isFinite(chatId)) return;
+
+            if (plan === 'paid_30') {
+              const u = await store.ensureUser(chatId);
+              if (u) {
+                u.pendingPaymentId = null;
+                u.pendingPlan = null;
+                await store.upsertUser(u);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[yookassa-webhook] handler error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+        }
+
+        return;
+      }
+
+      // Return_url page
+      if (method === 'GET' && url.startsWith('/success')) {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Оплата принята. Можно вернуться в Telegram.');
+        return;
+      }
+
+      // Default healthcheck
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('ok');
+    } catch (e) {
+      console.error('[http] error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+      try {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('error');
+      } catch (_) {}
+    }
   })
   .listen(PORT, () => console.log('HTTP listening on', PORT));
 
@@ -529,23 +748,55 @@ bot.action('START_FREE', async (ctx) => {
   await ctx.reply(afterStartText(), mainKeyboard(u));
 });
 
+// ✅ BUY_30 теперь не включает paid сразу — а создаёт платёж в ЮKassa
 bot.action('BUY_30', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
-
-  u.isActive = true;
-  u.programType = 'paid';
-  u.currentDay = 8;
-  u.supportStep = 1;
-  u.lastMorningSentKey = null;
-  u.lastEveningSentKey = null;
-
-  await store.upsertUser(u);
-
   await safeAnswerCbQuery(ctx);
-  await ctx.reply(
-    ['Хорошо.', '', 'Ты в 30 днях.', 'Завтра в 7:30 придёт день 8.', 'Идём глубже, но всё так же мягко — через тело.'].join('\n'),
-    mainKeyboard(u)
-  );
+
+  if (!havePaymentsEnabled()) {
+    await ctx.reply(
+      [
+        'Оплата пока не настроена на сервере.',
+        '',
+        'Нужно добавить переменные окружения:',
+        '— YOOKASSA_SHOP_ID',
+        '— YOOKASSA_SECRET_KEY',
+        '— BASE_URL (домен Railway)',
+        '',
+        'После этого кнопка оплаты заработает.'
+      ].join('\n'),
+      mainKeyboard(u)
+    );
+    return;
+  }
+
+  try {
+    // Создаём платёж
+    const { url, paymentId } = await createPayment30Days(ctx.chat.id);
+
+    // Сохраняем ожидание оплаты (чтобы видеть в базе)
+    u.pendingPlan = 'paid_30';
+    u.pendingPaymentId = paymentId;
+    await store.upsertUser(u);
+
+    await ctx.reply(
+      [
+        'Хорошо. Сейчас открою оплату.',
+        '',
+        'После успешной оплаты я сразу включу 30 дней и напишу тебе сюда.'
+      ].join('\n'),
+      Markup.inlineKeyboard([
+        [Markup.button.url('💳 Оплатить 30 дней', url)],
+        [Markup.button.callback('⬅️ Назад', 'BACK')]
+      ])
+    );
+  } catch (e) {
+    console.error('[BUY_30] payment error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    await ctx.reply(
+      `❌ Не получилось создать платёж: ${e && e.message ? e.message : String(e)}`,
+      mainKeyboard(u)
+    );
+  }
 });
 
 bot.action('START_SUPPORT', async (ctx) => {
@@ -736,6 +987,15 @@ async function boot() {
   // полезный лог “где мы сейчас” по Москве
   const p = moscowParts(new Date());
   console.log('[scheduler] now MSK:', p.isoLike, 'dayKey=', p.key);
+
+  // ✅ полезный лог по платежам
+  console.log('[payments] enabled=', havePaymentsEnabled(), 'shopId=', YOOKASSA_SHOP_ID ? 'set' : 'missing', 'baseUrl=', BASE_URL ? BASE_URL : 'missing');
+  if (YOOKASSA_WEBHOOK_USER || YOOKASSA_WEBHOOK_PASS) {
+    console.log('[payments] webhook basic auth enabled');
+  } else {
+    console.log('[payments] webhook basic auth disabled');
+  }
+  console.log('[payments] webhook path: /yookassa-webhook');
 }
 
 boot().catch((e) => {
