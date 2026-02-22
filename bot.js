@@ -4,7 +4,9 @@ require('dotenv').config();
 const http = require('http');
 const cron = require('node-cron');
 const { Telegraf, Markup } = require('telegraf');
-
+bot.launch().then(() => {
+  console.log('BOT LAUNCHED');
+});
 // ✅ YooKassa
 // ✅ YooKassa (safe require: бот не падает, даже если пакет не установился)
 const crypto = require('crypto');
