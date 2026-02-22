@@ -6,9 +6,16 @@ const cron = require('node-cron');
 const { Telegraf, Markup } = require('telegraf');
 
 // ✅ YooKassa
-const YooKassa = require('yookassa');
+// ✅ YooKassa (safe require: бот не падает, даже если пакет не установился)
 const crypto = require('crypto');
 
+let YooKassa = null;
+try {
+  // eslint-disable-next-line global-require
+  YooKassa = require('yookassa');
+} catch (e) {
+  console.error('[payments] yookassa module not found. Payments disabled until dependency is installed.');
+}
 const store = require('./store_pg');
 const { runMorning } = require('./jobs_morning');
 const { runEvening } = require('./jobs_evening');
@@ -40,7 +47,7 @@ const PRICE_30_RUB = String(process.env.PRICE_30_RUB || '299.00');
 const YOOKASSA_WEBHOOK_USER = process.env.YOOKASSA_WEBHOOK_USER || '';
 const YOOKASSA_WEBHOOK_PASS = process.env.YOOKASSA_WEBHOOK_PASS || '';
 
-const yooKassa = (YOOKASSA_SHOP_ID && YOOKASSA_SECRET_KEY)
+const yooKassa = (YooKassa && YOOKASSA_SHOP_ID && YOOKASSA_SECRET_KEY)
   ? new YooKassa({ shopId: YOOKASSA_SHOP_ID, secretKey: YOOKASSA_SECRET_KEY })
   : null;
 
