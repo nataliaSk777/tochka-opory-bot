@@ -4,13 +4,9 @@ require('dotenv').config();
 const http = require('http');
 const cron = require('node-cron');
 const { Telegraf, Markup } = require('telegraf');
-bot.launch().then(() => {
-  console.log('BOT LAUNCHED');
-});
-// ✅ YooKassa
-// ✅ YooKassa (safe require: бот не падает, даже если пакет не установился)
 const crypto = require('crypto');
 
+// ✅ YooKassa (safe require: бот не падает, даже если пакет не установился)
 let YooKassa = null;
 try {
   // eslint-disable-next-line global-require
@@ -18,6 +14,7 @@ try {
 } catch (e) {
   console.error('[payments] yookassa module not found. Payments disabled until dependency is installed.');
 }
+
 const store = require('./store_pg');
 const { runMorning } = require('./jobs_morning');
 const { runEvening } = require('./jobs_evening');
@@ -29,18 +26,26 @@ const { runEvening } = require('./jobs_evening');
 process.on('unhandledRejection', (e) => console.error('UNHANDLED_REJECTION:', e));
 process.on('uncaughtException', (e) => console.error('UNCAUGHT_EXCEPTION:', e));
 
+/* ============================================================================
+   Env / constants
+============================================================================ */
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
   console.error('BOT_TOKEN is required');
   process.exit(1);
 }
 
-// ✅ YooKassa env (для оплаты 30 дней)
-const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID;
-const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
+// Твой owner id (для админ-команд)
+const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID || '';
 
-// Базовый URL сервиса (Railway домен), нужен для return_url
-const BASE_URL = process.env.BASE_URL;
+// ✅ YooKassa env (поддерживаем оба набора имён переменных)
+// Ты сейчас на Railway используешь SHOP_ID и SECRET_KEY — поэтому делаем fallback.
+const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID || process.env.SHOP_ID || '';
+const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY || process.env.SECRET_KEY || '';
+
+// Базовый публичный URL сервиса (Railway домен). Поддержим BASE_URL и PUBLIC_URL.
+const BASE_URL = process.env.BASE_URL || process.env.PUBLIC_URL || '';
 
 // Цена 30 дней (в RUB). Можно переопределить в env.
 const PRICE_30_RUB = String(process.env.PRICE_30_RUB || '299.00');
@@ -48,6 +53,12 @@ const PRICE_30_RUB = String(process.env.PRICE_30_RUB || '299.00');
 // Опциональная защита webhook через Basic Auth
 const YOOKASSA_WEBHOOK_USER = process.env.YOOKASSA_WEBHOOK_USER || '';
 const YOOKASSA_WEBHOOK_PASS = process.env.YOOKASSA_WEBHOOK_PASS || '';
+
+const PORT = Number(process.env.PORT || 8080);
+
+/* ============================================================================
+   Payments (YooKassa)
+============================================================================ */
 
 const yooKassa = (YooKassa && YOOKASSA_SHOP_ID && YOOKASSA_SECRET_KEY)
   ? new YooKassa({ shopId: YOOKASSA_SHOP_ID, secretKey: YOOKASSA_SECRET_KEY })
@@ -80,10 +91,7 @@ function readJsonBody(req) {
     let data = '';
     req.on('data', (chunk) => {
       data += chunk;
-      // мягкий лимит на размер
-      if (data.length > 1024 * 1024) {
-        reject(new Error('Body too large'));
-      }
+      if (data.length > 1024 * 1024) reject(new Error('Body too large'));
     });
     req.on('end', () => {
       if (!data) return resolve(null);
@@ -103,10 +111,11 @@ function makeIdempotencyKey() {
 
 async function createPayment30Days(chatId) {
   if (!havePaymentsEnabled()) {
-    throw new Error('Payments not configured: set YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY, BASE_URL');
+    throw new Error('Payments not configured: set (SHOP_ID|YOOKASSA_SHOP_ID), (SECRET_KEY|YOOKASSA_SECRET_KEY), (BASE_URL|PUBLIC_URL)');
   }
 
   const idempotencyKey = makeIdempotencyKey();
+  const base = BASE_URL.replace(/\/$/, '');
 
   const payment = await yooKassa.createPayment(
     {
@@ -114,7 +123,7 @@ async function createPayment30Days(chatId) {
       capture: true,
       confirmation: {
         type: 'redirect',
-        return_url: `${BASE_URL.replace(/\/$/, '')}/success`
+        return_url: `${base}/success`
       },
       description: 'Точка опоры — 30 дней',
       metadata: {
@@ -135,157 +144,13 @@ async function createPayment30Days(chatId) {
   return { url, paymentId };
 }
 
-const PORT = Number(process.env.PORT || 3000);
-
-// ✅ HTTP server: healthcheck + webhook + success page
-http
-  .createServer(async (req, res) => {
-    try {
-      const method = String(req.method || 'GET').toUpperCase();
-      const url = String(req.url || '/');
-
-      // Webhook endpoint
-      if (method === 'POST' && url.startsWith('/yookassa-webhook')) {
-        if (!checkWebhookAuth(req)) {
-          res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
-          res.end('unauthorized');
-          return;
-        }
-
-        const event = await readJsonBody(req);
-
-        // Всегда отвечаем 200, если смогли разобрать запрос (ЮKassa ждёт 200)
-        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('ok');
-
-        // Обработка события после ответа
-        try {
-          if (!event || !event.event || !event.object) return;
-
-          if (event.event === 'payment.succeeded') {
-            const payment = event.object;
-            const meta = payment && payment.metadata ? payment.metadata : {};
-            const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
-            const plan = meta.plan != null ? String(meta.plan) : '';
-
-            if (!chatIdRaw) return;
-            const chatId = Number(chatIdRaw);
-            if (!Number.isFinite(chatId)) return;
-
-            if (plan === 'paid_30') {
-              const u = await store.ensureUser(chatId);
-
-              // идемпотентность: если уже paid/support — не дёргаем
-              if (u && u.programType !== 'paid') {
-                u.isActive = true;
-                u.programType = 'paid';
-                u.currentDay = 8;
-                u.supportStep = 1;
-                u.lastMorningSentKey = null;
-                u.lastEveningSentKey = null;
-
-                // чистим ожидание оплаты
-                u.pendingPaymentId = null;
-                u.pendingPlan = null;
-
-                await store.upsertUser(u);
-
-                try {
-                  await bot.telegram.sendMessage(
-                    chatId,
-                    [
-                      '✅ Оплата прошла.',
-                      '',
-                      'Ты в 30 днях.',
-                      'Завтра в 7:30 придёт день 8.',
-                      'Идём глубже, но всё так же мягко — через тело.'
-                    ].join('\n'),
-                    mainKeyboard(u)
-                  );
-                } catch (_) {}
-              } else if (u) {
-                // всё равно чистим pending, если вдруг висело
-                u.pendingPaymentId = null;
-                u.pendingPlan = null;
-                await store.upsertUser(u);
-              }
-            }
-          }
-
-          if (event.event === 'payment.canceled') {
-            const payment = event.object;
-            const meta = payment && payment.metadata ? payment.metadata : {};
-            const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
-            const plan = meta.plan != null ? String(meta.plan) : '';
-
-            if (!chatIdRaw) return;
-            const chatId = Number(chatIdRaw);
-            if (!Number.isFinite(chatId)) return;
-
-            if (plan === 'paid_30') {
-              const u = await store.ensureUser(chatId);
-              if (u) {
-                u.pendingPaymentId = null;
-                u.pendingPlan = null;
-                await store.upsertUser(u);
-              }
-            }
-          }
-        } catch (e) {
-          console.error('[yookassa-webhook] handler error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
-        }
-
-        return;
-      }
-
-      // Return_url page
-      if (method === 'GET' && url.startsWith('/success')) {
-        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Оплата принята. Можно вернуться в Telegram.');
-        return;
-      }
-
-      // Default healthcheck
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('ok');
-    } catch (e) {
-      console.error('[http] error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
-      try {
-        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('error');
-      } catch (_) {}
-    }
-  })
-  .listen(PORT, () => console.log('HTTP listening on', PORT));
-
-console.log('BOOT', new Date().toISOString(), 'tzOffsetMin=', new Date().getTimezoneOffset());
-
-const bot = new Telegraf(BOT_TOKEN);
-
-async function safeAnswerCbQuery(ctx) {
-  try { await ctx.answerCbQuery(); } catch (_) {}
-}
-
-function isActiveProgram(u) {
-  return !!(u && u.isActive && u.programType && u.programType !== 'none');
-}
-
-function isOwnerStrict(ctx) {
-  const ownerIdRaw = process.env.OWNER_CHAT_ID;
-  if (!ownerIdRaw) return false;
-  const ownerId = Number(ownerIdRaw);
-  if (!Number.isFinite(ownerId)) return false;
-  return !!(ctx && ctx.chat && ctx.chat.id === ownerId);
-}
-
 /* ============================================================================
-   Moscow time helpers (stable on Railway)
+   Time helpers (Moscow time, stable on Railway)
 ============================================================================ */
 
 const MOSCOW_TZ = 'Europe/Moscow';
 
 function moscowParts(d = new Date()) {
-  // Returns: { key:'YYYY-MM-DD', hour, minute, second, isoLike:'YYYY-MM-DD HH:mm:ss' }
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: MOSCOW_TZ,
     year: 'numeric',
@@ -316,8 +181,35 @@ function moscowParts(d = new Date()) {
 }
 
 function moscowDayKey(d = new Date()) {
-  const p = moscowParts(d);
-  return p.key;
+  return moscowParts(d).key;
+}
+
+/* ============================================================================
+   Bot instance (ВАЖНО: объявляем ДО любых bot.launch / bot.telegram)
+============================================================================ */
+
+const bot = new Telegraf(BOT_TOKEN);
+
+/* ============================================================================
+   Small helpers
+============================================================================ */
+
+console.log('BOOT', new Date().toISOString(), 'tzOffsetMin=', new Date().getTimezoneOffset());
+
+async function safeAnswerCbQuery(ctx) {
+  try { await ctx.answerCbQuery(); } catch (_) {}
+}
+
+function isActiveProgram(u) {
+  return !!(u && u.isActive && u.programType && u.programType !== 'none');
+}
+
+function isOwnerStrict(ctx) {
+  const ownerIdRaw = OWNER_CHAT_ID;
+  if (!ownerIdRaw) return false;
+  const ownerId = Number(ownerIdRaw);
+  if (!Number.isFinite(ownerId)) return false;
+  return !!(ctx && ctx.chat && ctx.chat.id === ownerId);
 }
 
 /* ============================================================================
@@ -584,9 +476,7 @@ bot.on('text', async (ctx, next) => {
 
     await ctx.reply('Спасибо. Я сохранила. 🫶');
 
-    const ownerIdRaw = process.env.OWNER_CHAT_ID;
-    const ownerId = ownerIdRaw ? Number(ownerIdRaw) : NaN;
-
+    const ownerId = OWNER_CHAT_ID ? Number(OWNER_CHAT_ID) : NaN;
     if (Number.isFinite(ownerId)) {
       const msg = [
         '📝 Новый отзыв',
@@ -757,7 +647,7 @@ bot.action('START_FREE', async (ctx) => {
   await ctx.reply(afterStartText(), mainKeyboard(u));
 });
 
-// ✅ BUY_30 теперь не включает paid сразу — а создаёт платёж в ЮKassa
+// ✅ BUY_30: создаём платёж и отдаём пользователю ссылку (лучший UX)
 bot.action('BUY_30', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
@@ -768,9 +658,9 @@ bot.action('BUY_30', async (ctx) => {
         'Оплата пока не настроена на сервере.',
         '',
         'Нужно добавить переменные окружения:',
-        '— YOOKASSA_SHOP_ID',
-        '— YOOKASSA_SECRET_KEY',
-        '— BASE_URL (домен Railway)',
+        '— SHOP_ID (или YOOKASSA_SHOP_ID)',
+        '— SECRET_KEY (или YOOKASSA_SECRET_KEY)',
+        '— BASE_URL (или PUBLIC_URL) — домен Railway',
         '',
         'После этого кнопка оплаты заработает.'
       ].join('\n'),
@@ -780,10 +670,8 @@ bot.action('BUY_30', async (ctx) => {
   }
 
   try {
-    // Создаём платёж
     const { url, paymentId } = await createPayment30Days(ctx.chat.id);
 
-    // Сохраняем ожидание оплаты (чтобы видеть в базе)
     u.pendingPlan = 'paid_30';
     u.pendingPaymentId = paymentId;
     await store.upsertUser(u);
@@ -842,35 +730,152 @@ bot.command('stop', async (ctx) => stopProgram(ctx));
 bot.hears(/^стоп$/i, async (ctx) => stopProgram(ctx));
 
 /* ============================================================================
+   HTTP server: healthcheck + webhook + success page
+============================================================================ */
+
+function writeText(res, code, body) {
+  res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end(body);
+}
+
+http
+  .createServer(async (req, res) => {
+    try {
+      const method = String(req.method || 'GET').toUpperCase();
+      const url = String(req.url || '/');
+
+      // Webhook endpoint
+      if (method === 'POST' && url.startsWith('/yookassa-webhook')) {
+        if (!checkWebhookAuth(req)) {
+          writeText(res, 401, 'unauthorized');
+          return;
+        }
+
+        const event = await readJsonBody(req);
+
+        // Всегда отвечаем 200, если смогли разобрать запрос (ЮKassa ждёт 200)
+        writeText(res, 200, 'ok');
+
+        // Обработка события после ответа
+        try {
+          if (!event || !event.event || !event.object) return;
+
+          if (event.event === 'payment.succeeded') {
+            const payment = event.object;
+            const meta = payment && payment.metadata ? payment.metadata : {};
+            const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
+            const plan = meta.plan != null ? String(meta.plan) : '';
+
+            if (!chatIdRaw) return;
+            const chatId = Number(chatIdRaw);
+            if (!Number.isFinite(chatId)) return;
+
+            if (plan === 'paid_30') {
+              const u = await store.ensureUser(chatId);
+
+              // идемпотентность: если уже paid/support — не дёргаем
+              if (u && u.programType !== 'paid') {
+                u.isActive = true;
+                u.programType = 'paid';
+                u.currentDay = 8;
+                u.supportStep = 1;
+                u.lastMorningSentKey = null;
+                u.lastEveningSentKey = null;
+
+                // чистим ожидание оплаты
+                u.pendingPaymentId = null;
+                u.pendingPlan = null;
+
+                await store.upsertUser(u);
+
+                try {
+                  await bot.telegram.sendMessage(
+                    chatId,
+                    [
+                      '✅ Оплата прошла.',
+                      '',
+                      'Ты в 30 днях.',
+                      'Завтра в 7:30 придёт день 8.',
+                      'Идём глубже, но всё так же мягко — через тело.'
+                    ].join('\n'),
+                    mainKeyboard(u)
+                  );
+                } catch (_) {}
+              } else if (u) {
+                u.pendingPaymentId = null;
+                u.pendingPlan = null;
+                await store.upsertUser(u);
+              }
+            }
+          }
+
+          if (event.event === 'payment.canceled') {
+            const payment = event.object;
+            const meta = payment && payment.metadata ? payment.metadata : {};
+            const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
+            const plan = meta.plan != null ? String(meta.plan) : '';
+
+            if (!chatIdRaw) return;
+            const chatId = Number(chatIdRaw);
+            if (!Number.isFinite(chatId)) return;
+
+            if (plan === 'paid_30') {
+              const u = await store.ensureUser(chatId);
+              if (u) {
+                u.pendingPaymentId = null;
+                u.pendingPlan = null;
+                await store.upsertUser(u);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[yookassa-webhook] handler error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+        }
+
+        return;
+      }
+
+      // Return_url page
+      if (method === 'GET' && url.startsWith('/success')) {
+        writeText(res, 200, 'Оплата принята. Можно вернуться в Telegram.');
+        return;
+      }
+
+      // Default healthcheck
+      writeText(res, 200, 'ok');
+    } catch (e) {
+      console.error('[http] error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+      try {
+        writeText(res, 500, 'error');
+      } catch (_) {}
+    }
+  })
+  .listen(PORT, '0.0.0.0', () => console.log('HTTP listening on', PORT));
+
+/* ============================================================================
    Scheduler (cron + watchdog + catch-up)
 ============================================================================ */
 
 let morningRunning = false;
 let eveningRunning = false;
 
-// Чтобы не дёргать runMorning/runEvening по сто раз в одном дне,
-// держим in-memory ключ запуска. Идём от московского дня.
 let lastMorningRunKey = null;
 let lastEveningRunKey = null;
 
-// Окна и догонялки (МСК)
 const MORNING_HOUR = 7;
 const MORNING_MINUTE = 30;
 const EVENING_HOUR = 20;
 const EVENING_MINUTE = 30;
 
-const WINDOW_MINUTES = 2;     // 07:30..07:32 и 20:30..20:32
-const MORNING_CATCHUP_END_HOUR = 11; // после рестарта — можно догнать до 11:59
-const EVENING_CATCHUP_END_HOUR = 23; // можно догнать до 23:59
+const WINDOW_MINUTES = 2;
+const MORNING_CATCHUP_END_HOUR = 11;
+const EVENING_CATCHUP_END_HOUR = 23;
 
 async function safeRunMorning(source) {
   const p = moscowParts(new Date());
   const runKey = p.key;
 
   if (morningRunning) return;
-
-  // Не запускаем второй раз в тот же день из планировщика (у пользователей всё равно есть lastMorningSentKey,
-  // но нам важно не создавать лишнюю нагрузку).
   if (lastMorningRunKey === runKey) return;
 
   try {
@@ -880,7 +885,6 @@ async function safeRunMorning(source) {
     await runMorning(bot);
     console.log(`[scheduler] MORNING done (${source}) msk=${p.isoLike} key=${runKey}`);
   } catch (e) {
-    // если упало — разрешим повторную попытку этим же днём
     lastMorningRunKey = null;
     console.error('[scheduler] MORNING error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
   } finally {
@@ -926,10 +930,7 @@ function startWatchdogScheduler() {
   const tick = async () => {
     const p = moscowParts(new Date());
 
-    // Утро: окно 07:30..07:32
     const morningWindow = isInWindow(p, MORNING_HOUR, MORNING_MINUTE);
-
-    // Утро: догонялка после рестарта — если уже после 07:30, но ещё до 11:59
     const morningCatchup =
       isAfterTargetSameDay(p, MORNING_HOUR, MORNING_MINUTE) &&
       p.hour <= MORNING_CATCHUP_END_HOUR;
@@ -938,10 +939,7 @@ function startWatchdogScheduler() {
       await safeRunMorning(morningWindow ? 'watchdog-window' : 'watchdog-catchup');
     }
 
-    // Вечер: окно 20:30..20:32
     const eveningWindow = isInWindow(p, EVENING_HOUR, EVENING_MINUTE);
-
-    // Вечер: догонялка — если уже после 20:30, но ещё до 23:59
     const eveningCatchup =
       isAfterTargetSameDay(p, EVENING_HOUR, EVENING_MINUTE) &&
       p.hour <= EVENING_CATCHUP_END_HOUR;
@@ -955,7 +953,6 @@ function startWatchdogScheduler() {
     tick().catch((e) => console.error('[scheduler] watchdog tick error', e && e.message ? e.message : e));
   }, 20000);
 
-  // первый тик сразу после старта (для догонялки после рестарта)
   tick().catch((e) => console.error('[scheduler] watchdog first tick error', e && e.message ? e.message : e));
 
   return () => clearInterval(t);
@@ -973,9 +970,8 @@ async function boot() {
   await store.init();
 
   await bot.launch();
-  console.log('BOT: launched');
+  console.log('BOT LAUNCHED');
 
-  // node-cron (основной “ровный” запуск)
   morningTask = cron.schedule(
     '30 7 * * *',
     async () => { await safeRunMorning('node-cron'); },
@@ -990,20 +986,13 @@ async function boot() {
 
   console.log('[scheduler] node-cron scheduled: morning 07:30, evening 20:30 (MSK)');
 
-  // watchdog (страховка: окно + догонялка)
   stopWatchdog = startWatchdogScheduler();
 
-  // полезный лог “где мы сейчас” по Москве
   const p = moscowParts(new Date());
   console.log('[scheduler] now MSK:', p.isoLike, 'dayKey=', p.key);
 
-  // ✅ полезный лог по платежам
   console.log('[payments] enabled=', havePaymentsEnabled(), 'shopId=', YOOKASSA_SHOP_ID ? 'set' : 'missing', 'baseUrl=', BASE_URL ? BASE_URL : 'missing');
-  if (YOOKASSA_WEBHOOK_USER || YOOKASSA_WEBHOOK_PASS) {
-    console.log('[payments] webhook basic auth enabled');
-  } else {
-    console.log('[payments] webhook basic auth disabled');
-  }
+  console.log('[payments] webhook basic auth', (YOOKASSA_WEBHOOK_USER || YOOKASSA_WEBHOOK_PASS) ? 'enabled' : 'disabled');
   console.log('[payments] webhook path: /yookassa-webhook');
 }
 
@@ -1012,17 +1001,12 @@ boot().catch((e) => {
   process.exit(1);
 });
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
-process.once('SIGINT', () => {
+function shutdown(signal) {
   try { if (morningTask) morningTask.stop(); } catch (_) {}
   try { if (eveningTask) eveningTask.stop(); } catch (_) {}
   try { if (stopWatchdog) stopWatchdog(); } catch (_) {}
-});
+  try { bot.stop(signal); } catch (_) {}
+}
 
-process.once('SIGTERM', () => {
-  try { if (morningTask) morningTask.stop(); } catch (_) {}
-  try { if (eveningTask) eveningTask.stop(); } catch (_) {}
-  try { if (stopWatchdog) stopWatchdog(); } catch (_) {}
-});
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
