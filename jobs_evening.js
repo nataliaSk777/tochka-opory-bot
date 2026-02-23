@@ -65,7 +65,6 @@ async function runEvening(bot) {
       if (u.programType === 'support' && !isSupportDay(parts)) continue;
       if (u.programType === 'none') continue;
 
-      // защита от дублей
       if (typeof store.claimDelivery === 'function') {
         const ok = await store.claimDelivery(u.chatId, 'evening', key);
         if (!ok) continue;
@@ -84,12 +83,17 @@ async function runEvening(bot) {
       await store.upsertUser(u);
       sent += 1;
 
-      if (u.programType === 'free' && Number(u.currentDay) === 7) {
+      // ✅ фикс: больше не будет спама офферами
+      if (u.programType === 'free' && Number(u.currentDay) === 7 && !u.free7OfferSent) {
         await sendOfferAfterFree7(bot, u.chatId);
+        u.free7OfferSent = true;
+        await store.upsertUser(u);
       }
 
-      if (u.programType === 'paid' && Number(u.currentDay) === 35) {
+      if (u.programType === 'paid' && Number(u.currentDay) === 35 && !u.paid35OfferSent) {
         await sendOfferAfterPaid35(bot, u.chatId);
+        u.paid35OfferSent = true;
+        await store.upsertUser(u);
       }
 
       await new Promise((r) => setTimeout(r, 40));
