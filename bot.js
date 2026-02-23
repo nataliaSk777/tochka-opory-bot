@@ -89,11 +89,21 @@ function checkWebhookAuth(req) {
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
+    let aborted = false;
+
     req.on('data', (chunk) => {
+      if (aborted) return;
+
       data += chunk;
-      if (data.length > 1024 * 1024) reject(new Error('Body too large'));
+      if (data.length > 1024 * 1024) {
+        aborted = true;
+        try { req.destroy(); } catch (_) {}
+        reject(new Error('Body too large'));
+      }
     });
+
     req.on('end', () => {
+      if (aborted) return;
       if (!data) return resolve(null);
       try {
         resolve(JSON.parse(data));
@@ -101,7 +111,11 @@ function readJsonBody(req) {
         reject(e);
       }
     });
-    req.on('error', reject);
+
+    req.on('error', (e) => {
+      if (aborted) return;
+      reject(e);
+    });
   });
 }
 
@@ -189,6 +203,16 @@ function moscowDayKey(d = new Date()) {
 ============================================================================ */
 
 const bot = new Telegraf(BOT_TOKEN);
+
+// ✅ глобальный перехват ошибок Telegraf (чтобы не терять апдейты в тишине)
+bot.catch((err, ctx) => {
+  console.error('[telegraf] error', {
+    updateType: ctx && ctx.updateType,
+    chatId: ctx && ctx.chat && ctx.chat.id,
+    message: err && err.message,
+    stack: err && err.stack
+  });
+});
 
 /* ============================================================================
    Small helpers
@@ -738,119 +762,131 @@ function writeText(res, code, body) {
   res.end(body);
 }
 
-http
-  .createServer(async (req, res) => {
-    try {
-      const method = String(req.method || 'GET').toUpperCase();
-      const url = String(req.url || '/');
+const server = http.createServer(async (req, res) => {
+  try {
+    const method = String(req.method || 'GET').toUpperCase();
+    const url = String(req.url || '/');
 
-      // Webhook endpoint
-      if (method === 'POST' && url.startsWith('/yookassa-webhook')) {
-        if (!checkWebhookAuth(req)) {
-          writeText(res, 401, 'unauthorized');
-          return;
-        }
-
-        const event = await readJsonBody(req);
-
-        // Всегда отвечаем 200, если смогли разобрать запрос (ЮKassa ждёт 200)
-        writeText(res, 200, 'ok');
-
-        // Обработка события после ответа
-        try {
-          if (!event || !event.event || !event.object) return;
-
-          if (event.event === 'payment.succeeded') {
-            const payment = event.object;
-            const meta = payment && payment.metadata ? payment.metadata : {};
-            const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
-            const plan = meta.plan != null ? String(meta.plan) : '';
-
-            if (!chatIdRaw) return;
-            const chatId = Number(chatIdRaw);
-            if (!Number.isFinite(chatId)) return;
-
-            if (plan === 'paid_30') {
-              const u = await store.ensureUser(chatId);
-
-              // идемпотентность: если уже paid/support — не дёргаем
-              if (u && u.programType !== 'paid') {
-                u.isActive = true;
-                u.programType = 'paid';
-                u.currentDay = 8;
-                u.supportStep = 1;
-                u.lastMorningSentKey = null;
-                u.lastEveningSentKey = null;
-
-                // чистим ожидание оплаты
-                u.pendingPaymentId = null;
-                u.pendingPlan = null;
-
-                await store.upsertUser(u);
-
-                try {
-                  await bot.telegram.sendMessage(
-                    chatId,
-                    [
-                      '✅ Оплата прошла.',
-                      '',
-                      'Ты в 30 днях.',
-                      'Завтра в 7:30 придёт день 8.',
-                      'Идём глубже, но всё так же мягко — через тело.'
-                    ].join('\n'),
-                    mainKeyboard(u)
-                  );
-                } catch (_) {}
-              } else if (u) {
-                u.pendingPaymentId = null;
-                u.pendingPlan = null;
-                await store.upsertUser(u);
-              }
-            }
-          }
-
-          if (event.event === 'payment.canceled') {
-            const payment = event.object;
-            const meta = payment && payment.metadata ? payment.metadata : {};
-            const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
-            const plan = meta.plan != null ? String(meta.plan) : '';
-
-            if (!chatIdRaw) return;
-            const chatId = Number(chatIdRaw);
-            if (!Number.isFinite(chatId)) return;
-
-            if (plan === 'paid_30') {
-              const u = await store.ensureUser(chatId);
-              if (u) {
-                u.pendingPaymentId = null;
-                u.pendingPlan = null;
-                await store.upsertUser(u);
-              }
-            }
-          }
-        } catch (e) {
-          console.error('[yookassa-webhook] handler error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
-        }
-
-        return;
-      }
-
-      // Return_url page
-      if (method === 'GET' && url.startsWith('/success')) {
-        writeText(res, 200, 'Оплата принята. Можно вернуться в Telegram.');
-        return;
-      }
-
-      // Default healthcheck
+    // ✅ Явный healthcheck (для Railway)
+    if (method === 'GET' && (url === '/' || url.startsWith('/health'))) {
       writeText(res, 200, 'ok');
-    } catch (e) {
-      console.error('[http] error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
-      try {
-        writeText(res, 500, 'error');
-      } catch (_) {}
+      return;
     }
-  })
-  .listen(PORT, '0.0.0.0', () => console.log('HTTP listening on', PORT));
+
+    // Webhook endpoint
+    if (method === 'POST' && url.startsWith('/yookassa-webhook')) {
+      if (!checkWebhookAuth(req)) {
+        writeText(res, 401, 'unauthorized');
+        return;
+      }
+
+      // ✅ Всегда отвечаем 200 ЮKassa, даже если body кривой (они ретраят)
+      let event = null;
+      try {
+        event = await readJsonBody(req);
+      } catch (e) {
+        console.error('[yookassa-webhook] bad body', e && e.message ? e.message : e);
+      }
+
+      writeText(res, 200, 'ok');
+
+      // Если не распарсили — выходим
+      if (!event || !event.event || !event.object) return;
+
+      // Обработка события после ответа
+      try {
+        if (event.event === 'payment.succeeded') {
+          const payment = event.object;
+          const meta = payment && payment.metadata ? payment.metadata : {};
+          const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
+          const plan = meta.plan != null ? String(meta.plan) : '';
+
+          if (!chatIdRaw) return;
+          const chatId = Number(chatIdRaw);
+          if (!Number.isFinite(chatId)) return;
+
+          if (plan === 'paid_30') {
+            const u = await store.ensureUser(chatId);
+
+            // идемпотентность: если уже paid/support — не дёргаем
+            if (u && u.programType !== 'paid') {
+              u.isActive = true;
+              u.programType = 'paid';
+              u.currentDay = 8;
+              u.supportStep = 1;
+              u.lastMorningSentKey = null;
+              u.lastEveningSentKey = null;
+
+              // чистим ожидание оплаты
+              u.pendingPaymentId = null;
+              u.pendingPlan = null;
+
+              await store.upsertUser(u);
+
+              try {
+                await bot.telegram.sendMessage(
+                  chatId,
+                  [
+                    '✅ Оплата прошла.',
+                    '',
+                    'Ты в 30 днях.',
+                    'Завтра в 7:30 придёт день 8.',
+                    'Идём глубже, но всё так же мягко — через тело.'
+                  ].join('\n'),
+                  mainKeyboard(u)
+                );
+              } catch (_) {}
+            } else if (u) {
+              u.pendingPaymentId = null;
+              u.pendingPlan = null;
+              await store.upsertUser(u);
+            }
+          }
+        }
+
+        if (event.event === 'payment.canceled') {
+          const payment = event.object;
+          const meta = payment && payment.metadata ? payment.metadata : {};
+          const chatIdRaw = meta.chatId != null ? String(meta.chatId) : null;
+          const plan = meta.plan != null ? String(meta.plan) : '';
+
+          if (!chatIdRaw) return;
+          const chatId = Number(chatIdRaw);
+          if (!Number.isFinite(chatId)) return;
+
+          if (plan === 'paid_30') {
+            const u = await store.ensureUser(chatId);
+            if (u) {
+              u.pendingPaymentId = null;
+              u.pendingPlan = null;
+              await store.upsertUser(u);
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[yookassa-webhook] handler error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+      }
+
+      return;
+    }
+
+    // Return_url page
+    if (method === 'GET' && url.startsWith('/success')) {
+      writeText(res, 200, 'Оплата принята. Можно вернуться в Telegram.');
+      return;
+    }
+
+    // ✅ Остальное — 404 (лучше для диагностики)
+    writeText(res, 404, 'not found');
+  } catch (e) {
+    console.error('[http] error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    try {
+      writeText(res, 500, 'error');
+    } catch (_) {}
+  }
+});
+
+server.listen(PORT, '0.0.0.0', () => console.log('HTTP listening on', PORT));
 
 /* ============================================================================
    Scheduler (cron + watchdog + catch-up)
@@ -1006,6 +1042,12 @@ function shutdown(signal) {
   try { if (eveningTask) eveningTask.stop(); } catch (_) {}
   try { if (stopWatchdog) stopWatchdog(); } catch (_) {}
   try { bot.stop(signal); } catch (_) {}
+
+  // ✅ аккуратно закрываем HTTP server
+  try { if (server) server.close(() => {}); } catch (_) {}
+
+  // ✅ если в store есть метод закрытия пула — используем (не ломаем, если нет)
+  try { if (store && typeof store.close === 'function') store.close(); } catch (_) {}
 }
 
 process.once('SIGINT', () => shutdown('SIGINT'));
