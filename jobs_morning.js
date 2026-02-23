@@ -35,13 +35,17 @@ function reviewKeyboard() {
 }
 
 async function maybeAskReview(bot, u, key) {
-  // просим отзыв на 4-й день free (после отправки сообщения)
   if (!u || !u.isActive) return;
   if (u.programType !== 'free') return;
   if (Number(u.currentDay) !== 4) return;
 
   const ok = await store.claimDelivery(u.chatId, 'review_ask', key);
   if (!ok) return;
+
+  // ✅ ВАЖНО: теперь отзыв точно ловится
+  u.awaitingReview = true;
+  u.reviewPostponed = false;
+  await store.upsertUser(u);
 
   const text = [
     'Можно я попрошу пару слов?',
@@ -57,7 +61,6 @@ async function maybeAskReview(bot, u, key) {
 }
 
 async function maybeRemindReview(bot, u, key) {
-  // одно мягкое напоминание тем, кто нажал “Позже”
   if (!u || !u.isActive) return;
   if (u.programType !== 'free') return;
   if (!u.reviewPostponed) return;
@@ -65,6 +68,10 @@ async function maybeRemindReview(bot, u, key) {
 
   const ok = await store.claimDelivery(u.chatId, 'review_ask_remind', key);
   if (!ok) return;
+
+  // ✅ тоже включаем ожидание
+  u.awaitingReview = true;
+  await store.upsertUser(u);
 
   const text = [
     'Я обещала напомнить мягко — напоминаю.',
@@ -78,7 +85,6 @@ async function maybeRemindReview(bot, u, key) {
 
   await bot.telegram.sendMessage(u.chatId, text, reviewKeyboard());
 
-  // чтобы напоминание было только один раз
   u.reviewPostponed = false;
   await store.upsertUser(u);
 }
@@ -98,7 +104,6 @@ async function runMorning(bot) {
       if (u.programType === 'support' && !isSupportDay(parts)) continue;
       if (u.programType === 'none') continue;
 
-      // защита от дублей на уровне БД
       if (typeof store.claimDelivery === 'function') {
         const ok = await store.claimDelivery(u.chatId, 'morning', key);
         if (!ok) continue;
@@ -109,17 +114,15 @@ async function runMorning(bot) {
 
       await bot.telegram.sendMessage(u.chatId, text);
 
+      // ✅ переносим сюда — теперь надёжно
+      u.lastMorningSentKey = key;
+
       if (typeof store.markDeliverySent === 'function') {
         await store.markDeliverySent(u.chatId, 'morning', key);
       }
 
-      // после успешной отправки — можем попросить отзыв (один раз)
       await maybeAskReview(bot, u, key);
-
-      // и можем один раз мягко напомнить на 6-й день (если откладывали)
       await maybeRemindReview(bot, u, key);
-
-      u.lastMorningSentKey = key;
 
       const isBoundary =
         (u.programType === 'free' && Number(u.currentDay) === 7) ||
