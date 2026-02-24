@@ -57,6 +57,25 @@ const YOOKASSA_WEBHOOK_PASS = process.env.YOOKASSA_WEBHOOK_PASS || '';
 const PORT = Number(process.env.PORT || 8080);
 
 /* ============================================================================
+   Telegraf webhook mode (fix 409 getUpdates conflict)
+============================================================================ */
+
+// В проде на Railway лучше webhook (убирает 409 Conflict из-за polling/getUpdates).
+// Включаем webhook автоматически, если задан BASE_URL/PUBLIC_URL,
+// либо можно форсировать через USE_WEBHOOK=true/false.
+const USE_WEBHOOK = (process.env.USE_WEBHOOK != null)
+  ? /^(1|true|yes)$/i.test(String(process.env.USE_WEBHOOK))
+  : Boolean(BASE_URL);
+
+// Чтобы не светить BOT_TOKEN в URL — делаем стабильный секретный путь из sha256(token).
+function makeWebhookPathFromToken(token) {
+  const h = crypto.createHash('sha256').update(String(token)).digest('hex');
+  return `/telegraf/${h.slice(0, 32)}`;
+}
+
+const TELEGRAM_WEBHOOK_PATH = process.env.TELEGRAM_WEBHOOK_PATH || makeWebhookPathFromToken(BOT_TOKEN);
+
+/* ============================================================================
    Payments (YooKassa)
 ============================================================================ */
 
@@ -754,7 +773,7 @@ bot.command('stop', async (ctx) => stopProgram(ctx));
 bot.hears(/^стоп$/i, async (ctx) => stopProgram(ctx));
 
 /* ============================================================================
-   HTTP server: healthcheck + webhook + success page
+   HTTP server: healthcheck + telegraf webhook + yookassa webhook + success page
 ============================================================================ */
 
 function writeText(res, code, body) {
@@ -773,7 +792,29 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Webhook endpoint
+    // ✅ Telegram webhook (fix 409: no getUpdates / polling)
+    if (USE_WEBHOOK && method === 'POST' && url.startsWith(TELEGRAM_WEBHOOK_PATH)) {
+      let update = null;
+      try {
+        update = await readJsonBody(req);
+      } catch (e) {
+        console.error('[telegram-webhook] bad body', e && e.message ? e.message : e);
+      }
+
+      // Telegram ждёт быстрый 200
+      writeText(res, 200, 'ok');
+
+      if (update) {
+        try {
+          await bot.handleUpdate(update);
+        } catch (e) {
+          console.error('[telegram-webhook] handleUpdate error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+        }
+      }
+      return;
+    }
+
+    // YooKassa webhook endpoint
     if (method === 'POST' && url.startsWith('/yookassa-webhook')) {
       if (!checkWebhookAuth(req)) {
         writeText(res, 401, 'unauthorized');
@@ -1005,8 +1046,25 @@ let eveningTask = null;
 async function boot() {
   await store.init();
 
-  await bot.launch();
-  console.log('BOT LAUNCHED');
+  // ✅ Запуск Telegraf: webhook в проде (убирает 409), polling оставляем только для локальной отладки
+  if (USE_WEBHOOK) {
+    const base = String(BASE_URL || '').replace(/\/$/, '');
+    if (!base) {
+      throw new Error('USE_WEBHOOK enabled but BASE_URL/PUBLIC_URL is missing');
+    }
+
+    const fullUrl = `${base}${TELEGRAM_WEBHOOK_PATH}`;
+
+    // Убедимся, что polling не будет мешать: ставим webhook (Telegram сам отключает getUpdates сценарий).
+    await bot.telegram.setWebhook(fullUrl, { drop_pending_updates: true });
+
+    console.log('BOT: webhook enabled');
+    console.log('[telegram] webhook url:', fullUrl);
+  } else {
+    // Локальный режим (если очень нужно): polling
+    await bot.launch({ dropPendingUpdates: true });
+    console.log('BOT: polling enabled');
+  }
 
   morningTask = cron.schedule(
     '30 7 * * *',
@@ -1041,6 +1099,8 @@ function shutdown(signal) {
   try { if (morningTask) morningTask.stop(); } catch (_) {}
   try { if (eveningTask) eveningTask.stop(); } catch (_) {}
   try { if (stopWatchdog) stopWatchdog(); } catch (_) {}
+
+  // ✅ В webhook-режиме bot.stop просто завершает middleware/пулы Telegraf
   try { bot.stop(signal); } catch (_) {}
 
   // ✅ аккуратно закрываем HTTP server
