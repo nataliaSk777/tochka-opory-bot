@@ -309,7 +309,17 @@ function afterStartText() {
 function stoppedText() {
   return [
     'Остановила отправку сообщений.',
-    'Если захочешь вернуться — нажми «🌿 Попробовать первую неделю».'
+    'Если захочешь вернуться — нажми «🌿 Вернуться».'
+  ].join('\n');
+}
+
+function backText() {
+  return [
+    '🌿 Возвращаю.',
+    '',
+    'Завтра в 7:30 придёт следующее утреннее сообщение.',
+    'Сегодня можно сделать один длинный выдох.',
+    'Этого достаточно.'
   ].join('\n');
 }
 
@@ -357,6 +367,7 @@ function subscriptionText(u) {
    UI
 ============================================================================ */
 
+// 🔒 “Начать заново” показываем ТОЛЬКО в free (чтобы не было риска случайно сбросить paid/support)
 function mainKeyboard(u) {
   if (!isActiveProgram(u)) {
     return Markup.inlineKeyboard([
@@ -364,7 +375,21 @@ function mainKeyboard(u) {
       [Markup.button.callback('ℹ️ Как это работает', 'HOW')]
     ]);
   }
-  return Markup.inlineKeyboard([[Markup.button.callback('ℹ️ Как это работает', 'HOW')]]);
+
+  // active
+  if (u && u.programType === 'free') {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback('⛔️ Остановить', 'STOP')],
+      [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
+      [Markup.button.callback('🔄 Начать заново', 'RESTART')]
+    ]);
+  }
+
+  // paid / support
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('⛔️ Остановить', 'STOP')],
+    [Markup.button.callback('ℹ️ Как это работает', 'HOW')]
+  ]);
 }
 
 function howKeyboard(u) {
@@ -386,6 +411,14 @@ function subscriptionKeyboard(u) {
     ]);
   }
   return mainKeyboard(u);
+}
+
+// ✅ Клавиатура после остановки: “вернуться” одним нажатием
+function stoppedKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🌿 Вернуться', 'RESUME')],
+    [Markup.button.callback('ℹ️ Как это работает', 'HOW')]
+  ]);
 }
 
 /* ============================================================================
@@ -659,7 +692,7 @@ bot.action('HOW', async (ctx) => {
 bot.action('BACK', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
-  await ctx.reply('Ок.', mainKeyboard(u));
+  await ctx.reply(startText(), mainKeyboard(u));
 });
 
 bot.action('SUB_INFO', async (ctx) => {
@@ -688,6 +721,55 @@ bot.action('START_FREE', async (ctx) => {
 
   await safeAnswerCbQuery(ctx);
   await ctx.reply(afterStartText(), mainKeyboard(u));
+});
+
+// 🔄 RESTART: доступен только в free (в UI мы его показываем только там, но и тут проверим)
+bot.action('RESTART', async (ctx) => {
+  const u = await store.ensureUser(ctx.chat.id);
+
+  if (!u || u.programType !== 'free') {
+    await safeAnswerCbQuery(ctx);
+    await ctx.reply('Перезапуск доступен только в первой неделе.', mainKeyboard(u));
+    return;
+  }
+
+  u.isActive = true;
+  u.programType = 'free';
+  u.currentDay = 1;
+  u.supportStep = 1;
+  u.lastMorningSentKey = null;
+  u.lastEveningSentKey = null;
+
+  u.pendingPaymentId = null;
+  u.pendingPlan = null;
+
+  await store.upsertUser(u);
+
+  await safeAnswerCbQuery(ctx);
+  await ctx.reply(
+    ['Ок. Начинаем сначала — с первой недели 🌿', '', 'Завтра в 7:30 придёт утреннее сообщение.'].join('\n'),
+    mainKeyboard(u)
+  );
+});
+
+// 🌿 RESUME: вернуться после остановки — без сброса прогресса
+bot.action('RESUME', async (ctx) => {
+  const u = await store.ensureUser(ctx.chat.id);
+
+  // Если вообще нет типа — безопасно предложим старт
+  if (!u || !u.programType || u.programType === 'none') {
+    await safeAnswerCbQuery(ctx);
+    await ctx.reply(startText(), mainKeyboard(u));
+    return;
+  }
+
+  u.isActive = true;
+
+  // НЕ трогаем currentDay / supportStep / sentKey — чтобы продолжить с того же места
+  await store.upsertUser(u);
+
+  await safeAnswerCbQuery(ctx);
+  await ctx.reply(backText(), mainKeyboard(u));
 });
 
 // ✅ BUY_30: создаём платёж и отдаём пользователю ссылку (лучший UX)
@@ -761,7 +843,7 @@ async function stopProgram(ctx) {
   const u = await store.ensureUser(ctx.chat.id);
   u.isActive = false;
   await store.upsertUser(u);
-  await ctx.reply(stoppedText(), mainKeyboard(u));
+  await ctx.reply(stoppedText(), stoppedKeyboard());
 }
 
 bot.action('STOP', async (ctx) => {
