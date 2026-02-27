@@ -19,6 +19,9 @@ const store = require('./store_pg');
 const { runMorning } = require('./jobs_morning');
 const { runEvening } = require('./jobs_evening');
 
+// ✅ Возвраты “в течение дня” из content.js
+const { getPauseText, getCheckText, getSupportText, getBackText } = require('./content');
+
 /* ============================================================================
    Boot safety
 ============================================================================ */
@@ -256,6 +259,45 @@ function isOwnerStrict(ctx) {
 }
 
 /* ============================================================================
+   Day return helpers (anti “lost among chats”)
+============================================================================ */
+
+function dayReturnSeed(ctx) {
+  // стабильный seed в течение дня по Москве + уникальность чата
+  const p = moscowParts(new Date());
+  const chatId = ctx && ctx.chat && ctx.chat.id ? Number(ctx.chat.id) : 0;
+  const base = `${p.key}:${Number.isFinite(chatId) ? chatId : 0}`;
+
+  let h = 0;
+  for (let i = 0; i < base.length; i += 1) {
+    h = ((h << 5) - h) + base.charCodeAt(i);
+    h |= 0; // eslint-disable-line no-bitwise
+  }
+  return Math.abs(h) + 1;
+}
+
+function dayReturnText(kind, seed) {
+  if (kind === 'pause') return getPauseText(seed);
+  if (kind === 'check') return getCheckText(seed);
+  if (kind === 'support') return getSupportText(seed);
+  if (kind === 'back') return getBackText(seed);
+  return null;
+}
+
+async function sendDayReturn(ctx, kind) {
+  const u = await store.ensureUser(ctx.chat.id);
+  const seed = dayReturnSeed(ctx);
+  const t = dayReturnText(kind, seed);
+
+  if (!t) {
+    await ctx.reply('Можно вернуться сюда позже. Я рядом.', mainKeyboard(u));
+    return;
+  }
+
+  await ctx.reply(t, mainKeyboard(u));
+}
+
+/* ============================================================================
    Texts
 ============================================================================ */
 
@@ -338,6 +380,9 @@ function howText(u) {
     'Потом (если захочется) — 30 дней глубже.',
     'После — поддержка 3 раза в неделю.',
     '',
+    'Если в течение дня хочется быстро вернуться в себя —',
+    'можно нажать «🫧 Пауза» или «🧭 Проверить себя».',
+    '',
     lineStop
   ].join('\n');
 }
@@ -419,6 +464,8 @@ function mainKeyboard(u) {
   if (!isActiveProgram(u)) {
     return Markup.inlineKeyboard([
       [Markup.button.callback('🌿 Попробовать первую неделю', 'START_FREE')],
+      [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
+      [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
       [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
       [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
     ]);
@@ -428,6 +475,8 @@ function mainKeyboard(u) {
   if (u && u.programType === 'free') {
     return Markup.inlineKeyboard([
       [Markup.button.callback('⛔️ Остановить', 'STOP')],
+      [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
+      [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
       [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
       [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')],
       [Markup.button.callback('🔄 Начать заново', 'RESTART')]
@@ -437,6 +486,8 @@ function mainKeyboard(u) {
   // paid / support
   return Markup.inlineKeyboard([
     [Markup.button.callback('⛔️ Остановить', 'STOP')],
+    [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
+    [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
     [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
     [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
   ]);
@@ -445,12 +496,16 @@ function mainKeyboard(u) {
 function howKeyboard(u) {
   if (isActiveProgram(u)) {
     return Markup.inlineKeyboard([
+      [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
+      [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
       [Markup.button.callback('⛔️ Остановить', 'STOP')],
       [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')],
       [Markup.button.callback('⬅️ Назад', 'BACK')]
     ]);
   }
   return Markup.inlineKeyboard([
+    [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
+    [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
     [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')],
     [Markup.button.callback('⬅️ Назад', 'BACK')]
   ]);
@@ -471,6 +526,8 @@ function subscriptionKeyboard(u) {
 function stoppedKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🌿 Вернуться', 'RESUME')],
+    [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
+    [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
     [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
     [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
   ]);
@@ -479,9 +536,6 @@ function stoppedKeyboard() {
 /* ============================================================================
    Safety: self-harm / crisis trigger (soft routing)
 ============================================================================ */
-
-// ⚠️ Мы НЕ “диагностируем” и не храним тексты.
-// Мы просто мягко маршрутизируем в поддержку, если человек пишет про самоповреждение/суицид.
 
 function normalizeText(s) {
   return String(s || '')
@@ -496,7 +550,6 @@ function looksLikeSelfHarmCrisis(text) {
   const t = normalizeText(text);
   if (!t) return false;
 
-  // Явные формулировки намерения/мысли
   const patterns = [
     /(?:не хочу|не могу) жить/,
     /хочу умереть/,
@@ -515,7 +568,6 @@ function looksLikeSelfHarmCrisis(text) {
     /я\s+сделаю\s+с\s+собой\s+что-?то/
   ];
 
-  // Мини-фильтр на “фигуры речи” типа “убиться на работе”
   const falsePositives = [
     /убиться\s+на\s+работе/,
     /убиваюсь\s+на\s+работе/,
@@ -855,6 +907,25 @@ bot.action('HELP_RESOURCES', async (ctx) => {
   );
 });
 
+// ================= DAY RETURN HANDLERS =================
+
+bot.action('DAY_PAUSE', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+  await sendDayReturn(ctx, 'pause');
+});
+
+bot.action('DAY_CHECK', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+  await sendDayReturn(ctx, 'check');
+});
+
+bot.action('DAY_SUPPORT', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+  await sendDayReturn(ctx, 'support');
+});
+
+// ================= BASE FLOW =================
+
 bot.start(async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
   await ctx.reply(startText(), mainKeyboard(u));
@@ -1036,6 +1107,20 @@ bot.command('stop', async (ctx) => stopProgram(ctx));
 bot.hears(/^стоп$/i, async (ctx) => stopProgram(ctx));
 
 /* ============================================================================
+   Day return commands + russian hears
+============================================================================ */
+
+bot.command('pause', async (ctx) => sendDayReturn(ctx, 'pause'));
+bot.command('check', async (ctx) => sendDayReturn(ctx, 'check'));
+bot.command('support', async (ctx) => sendDayReturn(ctx, 'support'));
+bot.command('back', async (ctx) => sendDayReturn(ctx, 'back'));
+
+// Русские варианты (удобны для пользователя)
+bot.hears(/^(пауза|стоп ?на ?секунду)$/i, async (ctx) => sendDayReturn(ctx, 'pause'));
+bot.hears(/^(проверить себя|проверка|чек|скан)$/i, async (ctx) => sendDayReturn(ctx, 'check'));
+bot.hears(/^(поддержка|мне тяжело|плохо)$/i, async (ctx) => sendDayReturn(ctx, 'support'));
+
+/* ============================================================================
    HTTP server: healthcheck + telegraf webhook + yookassa webhook + success page
 ============================================================================ */
 
@@ -1135,7 +1220,10 @@ const server = http.createServer(async (req, res) => {
                     '',
                     'Ты в 30 днях.',
                     'Завтра в 7:30 придёт день 8.',
-                    'Идём глубже, но всё так же мягко — через тело.'
+                    'Идём глубже, но всё так же мягко — через тело.',
+                    '',
+                    'Если в течение дня захочется —',
+                    'можно нажать «🫧 Пауза» или «🧺 Поддержка».'
                   ].join('\n'),
                   mainKeyboard(u)
                 );
