@@ -259,6 +259,50 @@ function isOwnerStrict(ctx) {
    Texts
 ============================================================================ */
 
+// ================= SAFETY (10/10, мягко и без давления) =================
+
+const SAFETY_INTRO = `Этот бот помогает мягко возвращать внимание к телу и немного замедляться.
+
+Он не заменяет психологическую или медицинскую помощь.
+
+Если тебе сейчас тяжело или появляются мысли о причинении себе вреда —
+важно обратиться к живому человеку:
+к близким, специалисту или на линию поддержки.
+
+Здесь можно идти в своём темпе.
+И можно остановиться в любой момент.`;
+
+const SAFETY_SUPPORT_TEXT = `Я рядом.
+
+Если сейчас тяжело — можно ничего не делать.
+Даже просто прочитать — уже достаточно.
+
+Можно сделать один мягкий выдох.
+И почувствовать опору — например, стопы или спину.
+
+Ты не обязана справляться с этим в одиночку.
+
+Если есть возможность —
+напиши кому-то из близких
+или обратись к специалисту.
+
+Если состояние острое —
+лучше обратиться на линию помощи в твоей стране
+или в экстренные службы.
+
+Ты важна.
+И помощь рядом.`;
+
+const SAFETY_RESOURCES_TEXT = `Если состояние тяжёлое — лучше обратиться к живому человеку.
+
+Варианты, которые обычно помогают быстро:
+— написать близкому (даже коротко: “мне сейчас тяжело, побудь со мной”)
+— обратиться к психологу/психотерапевту
+— если есть риск причинить себе вред — экстренные службы
+
+Если скажешь, в какой ты стране —
+я подскажу, где искать линии помощи и поддержку.`;
+
 function startText() {
   return [
     'Привет.',
@@ -272,7 +316,10 @@ function startText() {
     'Утром — 1–2 минуты через дыхание и внимание.',
     'Вечером — мягкое завершение дня.',
     '',
-    'Можно просто попробовать первую неделю.'
+    'Можно просто попробовать первую неделю.',
+    '',
+    'Важно: бот не заменяет психологическую или медицинскую помощь.',
+    'Если тебе сейчас тяжело — нажми «Мне сейчас тяжело».'
   ].join('\n');
 }
 
@@ -372,7 +419,8 @@ function mainKeyboard(u) {
   if (!isActiveProgram(u)) {
     return Markup.inlineKeyboard([
       [Markup.button.callback('🌿 Попробовать первую неделю', 'START_FREE')],
-      [Markup.button.callback('ℹ️ Как это работает', 'HOW')]
+      [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
+      [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
     ]);
   }
 
@@ -381,6 +429,7 @@ function mainKeyboard(u) {
     return Markup.inlineKeyboard([
       [Markup.button.callback('⛔️ Остановить', 'STOP')],
       [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
+      [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')],
       [Markup.button.callback('🔄 Начать заново', 'RESTART')]
     ]);
   }
@@ -388,7 +437,8 @@ function mainKeyboard(u) {
   // paid / support
   return Markup.inlineKeyboard([
     [Markup.button.callback('⛔️ Остановить', 'STOP')],
-    [Markup.button.callback('ℹ️ Как это работает', 'HOW')]
+    [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
+    [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
   ]);
 }
 
@@ -396,10 +446,14 @@ function howKeyboard(u) {
   if (isActiveProgram(u)) {
     return Markup.inlineKeyboard([
       [Markup.button.callback('⛔️ Остановить', 'STOP')],
+      [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')],
       [Markup.button.callback('⬅️ Назад', 'BACK')]
     ]);
   }
-  return Markup.inlineKeyboard([[Markup.button.callback('⬅️ Назад', 'BACK')]]);
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')],
+    [Markup.button.callback('⬅️ Назад', 'BACK')]
+  ]);
 }
 
 function subscriptionKeyboard(u) {
@@ -417,9 +471,105 @@ function subscriptionKeyboard(u) {
 function stoppedKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🌿 Вернуться', 'RESUME')],
-    [Markup.button.callback('ℹ️ Как это работает', 'HOW')]
+    [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
+    [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
   ]);
 }
+
+/* ============================================================================
+   Safety: self-harm / crisis trigger (soft routing)
+============================================================================ */
+
+// ⚠️ Мы НЕ “диагностируем” и не храним тексты.
+// Мы просто мягко маршрутизируем в поддержку, если человек пишет про самоповреждение/суицид.
+
+function normalizeText(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Базовые триггеры (на русском). Список намеренно короткий и “очевидный”, чтобы меньше ложных срабатываний.
+function looksLikeSelfHarmCrisis(text) {
+  const t = normalizeText(text);
+  if (!t) return false;
+
+  // Явные формулировки намерения/мысли
+  const patterns = [
+    /(?:не хочу|не могу) жить/,
+    /хочу умереть/,
+    /хочу покончить(?:\s+с\s+собой)?/,
+    /покончить\s+с\s+собой/,
+    /совершить\s+суицид/,
+    /\bсуицид\b/,
+    /убить\s+себя/,
+    /умереть\s+сегодня/,
+    /умереть\s+сейчас/,
+    /причинить\s+себе\s+вред/,
+    /самоповреждени/,
+    /порезать\s+себя/,
+    /режу\s+себя/,
+    /я\s+порезал(?:а)?\s+себя/,
+    /я\s+сделаю\s+с\s+собой\s+что-?то/
+  ];
+
+  // Мини-фильтр на “фигуры речи” типа “убиться на работе”
+  const falsePositives = [
+    /убиться\s+на\s+работе/,
+    /убиваюсь\s+на\s+работе/,
+    /умереть\s+со\s+смеху/,
+    /смеял(?:ся|ась)\s+до\s+слез/
+  ];
+
+  if (falsePositives.some(r => r.test(t))) return false;
+
+  return patterns.some(r => r.test(t));
+}
+
+async function replySafetySupport(ctx) {
+  await ctx.reply(
+    SAFETY_SUPPORT_TEXT,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('📞 Где найти помощь', 'HELP_RESOURCES')],
+      [Markup.button.callback('⬅️ Назад', 'BACK')]
+    ])
+  );
+}
+
+// Перехват текстовых сообщений: если кризис — показываем поддержку и НЕ идём дальше по цепочке.
+bot.on('text', async (ctx, next) => {
+  try {
+    if (!ctx || !ctx.message || typeof ctx.message.text !== 'string') return next();
+
+    const msg = ctx.message.text;
+    if (!msg) return next();
+
+    // Не трогаем команды
+    if (msg.trim().startsWith('/')) return next();
+
+    if (looksLikeSelfHarmCrisis(msg)) {
+      // Если вдруг ждали отзыв — снимаем ожидание, чтобы не смешивать режимы
+      try {
+        const u = await store.getUser(ctx.chat.id);
+        if (u && u.awaitingReview) {
+          u.awaitingReview = false;
+          u.reviewPostponed = true;
+          await store.upsertUser(u);
+        }
+      } catch (_) {}
+
+      await replySafetySupport(ctx);
+      return; // стопаем дальнейшие обработчики
+    }
+
+    return next();
+  } catch (e) {
+    console.error('[safety] text intercept error', e && e.message ? e.message : e);
+    return next();
+  }
+});
 
 /* ============================================================================
    Debug
@@ -678,6 +828,33 @@ bot.command('deliveries', async (ctx) => {
    Handlers
 ============================================================================ */
 
+// ================= SAFETY HANDLERS =================
+
+bot.action('NEED_HELP', async (ctx) => {
+  await store.ensureUser(ctx.chat.id);
+  await safeAnswerCbQuery(ctx);
+
+  await ctx.reply(
+    SAFETY_SUPPORT_TEXT,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('📞 Где найти помощь', 'HELP_RESOURCES')],
+      [Markup.button.callback('⬅️ Назад', 'BACK')]
+    ])
+  );
+});
+
+bot.action('HELP_RESOURCES', async (ctx) => {
+  await store.ensureUser(ctx.chat.id);
+  await safeAnswerCbQuery(ctx);
+
+  await ctx.reply(
+    SAFETY_RESOURCES_TEXT,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('⬅️ Назад', 'BACK')]
+    ])
+  );
+});
+
 bot.start(async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
   await ctx.reply(startText(), mainKeyboard(u));
@@ -720,6 +897,10 @@ bot.action('START_FREE', async (ctx) => {
   await store.upsertUser(u);
 
   await safeAnswerCbQuery(ctx);
+
+  // один раз — мягкая рамка безопасности
+  await ctx.reply(SAFETY_INTRO);
+
   await ctx.reply(afterStartText(), mainKeyboard(u));
 });
 
