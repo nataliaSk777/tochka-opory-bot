@@ -19,8 +19,13 @@ const store = require('./store_pg');
 const { runMorning } = require('./jobs_morning');
 const { runEvening } = require('./jobs_evening');
 
-// ✅ Возвраты “в течение дня” из content.js
-const { getPauseText, getCheckText, getSupportText, getBackText } = require('./content');
+// ✅ content: утро/вечер + “возвраты в течение дня”
+const {
+  getPauseText,
+  getCheckText,
+  getSupportText,
+  getBackText
+} = require('./content');
 
 /* ============================================================================
    Boot safety
@@ -145,9 +150,20 @@ function makeIdempotencyKey() {
   return crypto.randomBytes(16).toString('hex');
 }
 
-async function createPayment30Days(chatId) {
+// ✅ email для чека (54-ФЗ) — часто обязателен, иначе createPayment падает
+function isValidEmail(s) {
+  const t = String(s || '').trim();
+  if (t.length < 6 || t.length > 200) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i.test(t);
+}
+
+async function createPayment30Days(chatId, receiptEmail) {
   if (!havePaymentsEnabled()) {
     throw new Error('Payments not configured: set (SHOP_ID|YOOKASSA_SHOP_ID), (SECRET_KEY|YOOKASSA_SECRET_KEY), (BASE_URL|PUBLIC_URL)');
+  }
+
+  if (!isValidEmail(receiptEmail)) {
+    throw new Error('Receipt email is required');
   }
 
   const idempotencyKey = makeIdempotencyKey();
@@ -165,6 +181,19 @@ async function createPayment30Days(chatId) {
       metadata: {
         plan: 'paid_30',
         chatId: String(chatId)
+      },
+
+      // ✅ ЧЕК (54-ФЗ): во многих магазинах без receipt платеж не создаётся
+      receipt: {
+        customer: { email: String(receiptEmail).trim() },
+        items: [
+          {
+            description: 'Подписка «Точка опоры» — 30 дней',
+            quantity: 1,
+            amount: { value: PRICE_30_RUB, currency: 'RUB' },
+            vat_code: 1
+          }
+        ]
       }
     },
     idempotencyKey
@@ -259,7 +288,7 @@ function isOwnerStrict(ctx) {
 }
 
 /* ============================================================================
-   Day return helpers (anti “lost among chats”)
+   Day Return (anti “lost among chats”): seed + router + sender
 ============================================================================ */
 
 function dayReturnSeed(ctx) {
@@ -268,10 +297,11 @@ function dayReturnSeed(ctx) {
   const chatId = ctx && ctx.chat && ctx.chat.id ? Number(ctx.chat.id) : 0;
   const base = `${p.key}:${Number.isFinite(chatId) ? chatId : 0}`;
 
+  // простой стабильный хэш в число
   let h = 0;
   for (let i = 0; i < base.length; i += 1) {
     h = ((h << 5) - h) + base.charCodeAt(i);
-    h |= 0; // eslint-disable-line no-bitwise
+    h |= 0;
   }
   return Math.abs(h) + 1;
 }
@@ -286,6 +316,21 @@ function dayReturnText(kind, seed) {
 
 async function sendDayReturn(ctx, kind) {
   const u = await store.ensureUser(ctx.chat.id);
+
+  // Если человек сейчас пишет отзыв — не уводим в “паузы”
+  if (u && u.awaitingReview) {
+    await ctx.reply(
+      [
+        'Я вижу, ты в отзыве.',
+        '',
+        'Если хочется — можно дописать пару строк одним сообщением.',
+        'А “пауза/поддержка” — в любой момент после.'
+      ].join('\n'),
+      reviewKeyboard()
+    );
+    return;
+  }
+
   const seed = dayReturnSeed(ctx);
   const t = dayReturnText(kind, seed);
 
@@ -380,8 +425,8 @@ function howText(u) {
     'Потом (если захочется) — 30 дней глубже.',
     'После — поддержка 3 раза в неделю.',
     '',
-    'Если в течение дня хочется быстро вернуться в себя —',
-    'можно нажать «🫧 Пауза» или «🧭 Проверить себя».',
+    'Маленький секрет: можно заходить сюда и днём —',
+    'на “Пауза / Проверить себя / Поддержка”.',
     '',
     lineStop
   ].join('\n');
@@ -430,7 +475,8 @@ function subscriptionText(u) {
     return [
       '✅ Сейчас включена поддержка.',
       '',
-      'Это короткие возвращения к телу 3 раза в неделю.'
+      'Это короткие возвращения к телу 3 раза в неделю.',
+      'И плюс — можно пользоваться “Пауза/Проверить себя/Поддержка” в любой момент.'
     ].join('\n');
   }
 
@@ -533,6 +579,12 @@ function stoppedKeyboard() {
   ]);
 }
 
+// ✅ Клавиатура для ввода email (чек)
+function receiptEmailKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('⬅️ Назад', 'BACK')]
+  ]);
+}
 /* ============================================================================
    Safety: self-harm / crisis trigger (soft routing)
 ============================================================================ */
@@ -783,6 +835,76 @@ bot.command('reviews_count', async (ctx) => {
 });
 
 /* ============================================================================
+   Receipt email capture (for 54-FZ receipts in YooKassa)
+============================================================================ */
+
+bot.on('text', async (ctx, next) => {
+  try {
+    if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
+
+    const text = ctx.message.text.trim();
+    if (!text) return next();
+
+    if (text.startsWith('/')) return next();
+    if (/^стоп$/i.test(text)) return next();
+
+    const u = await store.getUser(ctx.chat.id);
+    if (!u || !u.awaitingReceiptEmail) return next();
+
+    // если вдруг человек в отзыве — не мешаем
+    if (u.awaitingReview) return next();
+
+    if (!isValidEmail(text)) {
+      await ctx.reply(
+        [
+          'Похоже, это не email.',
+          'Попробуй ещё раз, пожалуйста.',
+          'Например: name@gmail.com'
+        ].join('\n'),
+        receiptEmailKeyboard()
+      );
+      return;
+    }
+
+    u.receiptEmail = text;
+    u.awaitingReceiptEmail = false;
+    await store.upsertUser(u);
+
+    // ✅ сразу создаём оплату
+    try {
+      const { url, paymentId } = await createPayment30Days(ctx.chat.id, u.receiptEmail);
+
+      u.pendingPlan = 'paid_30';
+      u.pendingPaymentId = paymentId;
+      await store.upsertUser(u);
+
+      await ctx.reply(
+        [
+          'Спасибо. Email для чека сохранён.',
+          '',
+          'Открываю оплату.'
+        ].join('\n'),
+        Markup.inlineKeyboard([
+          [Markup.button.url('💳 Оплатить 30 дней', url)],
+          [Markup.button.callback('⬅️ Назад', 'BACK')]
+        ])
+      );
+    } catch (e) {
+      console.error('[receiptEmail] create payment error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+      await ctx.reply(
+        `❌ Не получилось создать платёж: ${e && e.message ? e.message : String(e)}`,
+        mainKeyboard(u)
+      );
+    }
+
+    return;
+  } catch (e) {
+    console.error('[receiptEmail] handler error', e && e.message ? e.message : e);
+    return next();
+  }
+});
+
+/* ============================================================================
    Admin stats / manual ticks
 ============================================================================ */
 
@@ -940,6 +1062,13 @@ bot.action('HOW', async (ctx) => {
 bot.action('BACK', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
+
+  // ✅ чтобы не “залипать” в режиме ввода email
+  if (u) {
+    u.awaitingReceiptEmail = false;
+    await store.upsertUser(u);
+  }
+
   await ctx.reply(startText(), mainKeyboard(u));
 });
 
@@ -964,6 +1093,9 @@ bot.action('START_FREE', async (ctx) => {
   u.supportStep = 1;
   u.lastMorningSentKey = null;
   u.lastEveningSentKey = null;
+
+  // ✅ сброс режимов ввода
+  u.awaitingReceiptEmail = false;
 
   await store.upsertUser(u);
 
@@ -994,6 +1126,9 @@ bot.action('RESTART', async (ctx) => {
 
   u.pendingPaymentId = null;
   u.pendingPlan = null;
+
+  // ✅ сброс режимов ввода
+  u.awaitingReceiptEmail = false;
 
   await store.upsertUser(u);
 
@@ -1046,11 +1181,31 @@ bot.action('BUY_30', async (ctx) => {
     return;
   }
 
+  // ✅ если email для чека ещё не сохранён — попросим
+  if (!u.receiptEmail) {
+    u.awaitingReceiptEmail = true;
+    await store.upsertUser(u);
+
+    await ctx.reply(
+      [
+        'Перед оплатой нужен email для чека.',
+        '',
+        'Напиши, пожалуйста, свой email одним сообщением.',
+        'Например: name@gmail.com',
+        '',
+        'Если передумала — нажми «⬅️ Назад».'
+      ].join('\n'),
+      receiptEmailKeyboard()
+    );
+    return;
+  }
+
   try {
-    const { url, paymentId } = await createPayment30Days(ctx.chat.id);
+    const { url, paymentId } = await createPayment30Days(ctx.chat.id, u.receiptEmail);
 
     u.pendingPlan = 'paid_30';
     u.pendingPaymentId = paymentId;
+    u.awaitingReceiptEmail = false;
     await store.upsertUser(u);
 
     await ctx.reply(
@@ -1082,6 +1237,9 @@ bot.action('START_SUPPORT', async (ctx) => {
   u.lastMorningSentKey = null;
   u.lastEveningSentKey = null;
 
+  // ✅ сброс режимов ввода
+  u.awaitingReceiptEmail = false;
+
   await store.upsertUser(u);
 
   await safeAnswerCbQuery(ctx);
@@ -1094,6 +1252,7 @@ bot.action('START_SUPPORT', async (ctx) => {
 async function stopProgram(ctx) {
   const u = await store.ensureUser(ctx.chat.id);
   u.isActive = false;
+  u.awaitingReceiptEmail = false;
   await store.upsertUser(u);
   await ctx.reply(stoppedText(), stoppedKeyboard());
 }
@@ -1107,7 +1266,7 @@ bot.command('stop', async (ctx) => stopProgram(ctx));
 bot.hears(/^стоп$/i, async (ctx) => stopProgram(ctx));
 
 /* ============================================================================
-   Day return commands + russian hears
+   Day Return commands + russian hears
 ============================================================================ */
 
 bot.command('pause', async (ctx) => sendDayReturn(ctx, 'pause'));
@@ -1119,7 +1278,6 @@ bot.command('back', async (ctx) => sendDayReturn(ctx, 'back'));
 bot.hears(/^(пауза|стоп ?на ?секунду)$/i, async (ctx) => sendDayReturn(ctx, 'pause'));
 bot.hears(/^(проверить себя|проверка|чек|скан)$/i, async (ctx) => sendDayReturn(ctx, 'check'));
 bot.hears(/^(поддержка|мне тяжело|плохо)$/i, async (ctx) => sendDayReturn(ctx, 'support'));
-
 /* ============================================================================
    HTTP server: healthcheck + telegraf webhook + yookassa webhook + success page
 ============================================================================ */
@@ -1210,6 +1368,9 @@ const server = http.createServer(async (req, res) => {
               u.pendingPaymentId = null;
               u.pendingPlan = null;
 
+              // ✅ не трогаем receiptEmail: пригодится на будущее
+              u.awaitingReceiptEmail = false;
+
               await store.upsertUser(u);
 
               try {
@@ -1231,6 +1392,7 @@ const server = http.createServer(async (req, res) => {
             } else if (u) {
               u.pendingPaymentId = null;
               u.pendingPlan = null;
+              u.awaitingReceiptEmail = false;
               await store.upsertUser(u);
             }
           }
@@ -1251,6 +1413,7 @@ const server = http.createServer(async (req, res) => {
             if (u) {
               u.pendingPaymentId = null;
               u.pendingPlan = null;
+              u.awaitingReceiptEmail = false;
               await store.upsertUser(u);
             }
           }
@@ -1436,30 +1599,4 @@ async function boot() {
   const p = moscowParts(new Date());
   console.log('[scheduler] now MSK:', p.isoLike, 'dayKey=', p.key);
 
-  console.log('[payments] enabled=', havePaymentsEnabled(), 'shopId=', YOOKASSA_SHOP_ID ? 'set' : 'missing', 'baseUrl=', BASE_URL ? BASE_URL : 'missing');
-  console.log('[payments] webhook basic auth', (YOOKASSA_WEBHOOK_USER || YOOKASSA_WEBHOOK_PASS) ? 'enabled' : 'disabled');
-  console.log('[payments] webhook path: /yookassa-webhook');
-}
-
-boot().catch((e) => {
-  console.error('BOOT FAILED:', e && e.stack ? e.stack : (e && e.message ? e.message : e));
-  process.exit(1);
-});
-
-function shutdown(signal) {
-  try { if (morningTask) morningTask.stop(); } catch (_) {}
-  try { if (eveningTask) eveningTask.stop(); } catch (_) {}
-  try { if (stopWatchdog) stopWatchdog(); } catch (_) {}
-
-  // ✅ В webhook-режиме bot.stop просто завершает middleware/пулы Telegraf
-  try { bot.stop(signal); } catch (_) {}
-
-  // ✅ аккуратно закрываем HTTP server
-  try { if (server) server.close(() => {}); } catch (_) {}
-
-  // ✅ если в store есть метод закрытия пула — используем (не ломаем, если нет)
-  try { if (store && typeof store.close === 'function') store.close(); } catch (_) {}
-}
-
-process.once('SIGINT', () => shutdown('SIGINT'));
-process.once('SIGTERM', () => shutdown('SIGTERM'));
+  console.log('[payments] enabled=', havePaymentsEnabled(), 'shopId=', YOOKASSA_SHOP
