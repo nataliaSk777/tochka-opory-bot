@@ -29,6 +29,11 @@ async function init() {
       pending_plan TEXT,
       receipt_email TEXT,
       awaiting_receipt_email BOOLEAN NOT NULL DEFAULT FALSE,
+
+      -- ✅ экстренная помощь по стране
+      country_code TEXT,
+      awaiting_country_name BOOLEAN NOT NULL DEFAULT FALSE,
+
       awaiting_review BOOLEAN NOT NULL DEFAULT FALSE,
       review_postponed BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -42,6 +47,11 @@ async function init() {
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS pending_plan TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS receipt_email TEXT;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_receipt_email BOOLEAN NOT NULL DEFAULT FALSE;`);
+
+  // ✅ экстренная помощь по стране
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS country_code TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_country_name BOOLEAN NOT NULL DEFAULT FALSE;`);
+
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_review BOOLEAN NOT NULL DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS review_postponed BOOLEAN NOT NULL DEFAULT FALSE;`);
 
@@ -98,6 +108,10 @@ function rowToUser(r) {
     receiptEmail: r.receipt_email || null,
     awaitingReceiptEmail: !!r.awaiting_receipt_email,
 
+    // ✅ экстренная помощь по стране
+    countryCode: r.country_code || null,
+    awaitingCountryName: !!r.awaiting_country_name,
+
     // ✅ отзывы
     awaitingReview: !!r.awaiting_review,
     reviewPostponed: !!r.review_postponed
@@ -117,9 +131,10 @@ async function upsertUser(u) {
         last_morning_sent_key, last_evening_sent_key, paid_until, last_payment_id,
         pending_payment_id, pending_plan,
         receipt_email, awaiting_receipt_email,
+        country_code, awaiting_country_name,
         awaiting_review, review_postponed, updated_at
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
      ON CONFLICT (chat_id) DO UPDATE SET
        is_active = EXCLUDED.is_active,
        program_type = EXCLUDED.program_type,
@@ -133,6 +148,8 @@ async function upsertUser(u) {
        pending_plan = EXCLUDED.pending_plan,
        receipt_email = EXCLUDED.receipt_email,
        awaiting_receipt_email = EXCLUDED.awaiting_receipt_email,
+       country_code = EXCLUDED.country_code,
+       awaiting_country_name = EXCLUDED.awaiting_country_name,
        awaiting_review = EXCLUDED.awaiting_review,
        review_postponed = EXCLUDED.review_postponed,
        updated_at = NOW()`,
@@ -152,6 +169,9 @@ async function upsertUser(u) {
 
       u.receiptEmail || null,
       !!u.awaitingReceiptEmail,
+
+      u.countryCode ? String(u.countryCode) : null,
+      !!u.awaitingCountryName,
 
       !!u.awaitingReview,
       !!u.reviewPostponed
@@ -185,6 +205,9 @@ async function ensureUser(chatId) {
 
     receiptEmail: null,
     awaitingReceiptEmail: false,
+
+    countryCode: null,
+    awaitingCountryName: false,
 
     awaitingReview: false,
     reviewPostponed: false
