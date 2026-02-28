@@ -87,7 +87,20 @@ function formatEmergencyText(countryCode) {
   return lines.join('\n');
 }
 
-module.exports = {
-  EMERGENCY,
-  formatEmergencyText
-};
+function fallbackEmergencyText(countryName) {
+  return [
+    'Если состояние тяжёлое — обратись к живому человеку.',
+    '',
+    `Я не знаю экстренные номера для "${countryName}", но вот универсальные рекомендации:`,
+    '',
+    '— В Европе: 112',
+    '— В США: 911',
+    '— В Австралии: 000 (или 112 с мобильного)',
+    '',
+    'Или загугли "[страна] emergency numbers"',
+    '',
+    'Если есть риск причинить себе вред — лучше звонить в экстренные службы.'
+  ].join('\n');
+}
+
+module.exports = { EMERGENCY, formatEmergencyText, fallbackEmergencyText };
