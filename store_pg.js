@@ -25,6 +25,10 @@ async function init() {
       last_evening_sent_key TEXT,
       paid_until TIMESTAMPTZ,
       last_payment_id TEXT,
+      pending_payment_id TEXT,
+      pending_plan TEXT,
+      receipt_email TEXT,
+      awaiting_receipt_email BOOLEAN NOT NULL DEFAULT FALSE,
       awaiting_review BOOLEAN NOT NULL DEFAULT FALSE,
       review_postponed BOOLEAN NOT NULL DEFAULT FALSE,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -34,6 +38,10 @@ async function init() {
   // миграции на случай старой таблицы
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_payment_id TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS pending_payment_id TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS pending_plan TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS receipt_email TEXT;`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_receipt_email BOOLEAN NOT NULL DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS awaiting_review BOOLEAN NOT NULL DEFAULT FALSE;`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS review_postponed BOOLEAN NOT NULL DEFAULT FALSE;`);
 
@@ -50,6 +58,10 @@ async function init() {
     );
   `);
 
+  // ускорение выборок по дню
+  await pool.query(`CREATE INDEX IF NOT EXISTS deliveries_send_key_idx ON deliveries (send_key);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS deliveries_send_key_kind_idx ON deliveries (send_key, kind);`);
+
   // reviews
   await pool.query(`
     CREATE TABLE IF NOT EXISTS reviews (
@@ -61,6 +73,9 @@ async function init() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS reviews_created_at_idx ON reviews (created_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS reviews_chat_id_idx ON reviews (chat_id);`);
 }
 
 function rowToUser(r) {
@@ -74,6 +89,16 @@ function rowToUser(r) {
     lastEveningSentKey: r.last_evening_sent_key,
     paidUntil: r.paid_until ? new Date(r.paid_until).toISOString() : null,
     lastPaymentId: r.last_payment_id || null,
+
+    // ✅ оплата/ожидание оплаты
+    pendingPaymentId: r.pending_payment_id || null,
+    pendingPlan: r.pending_plan || null,
+
+    // ✅ email для чека
+    receiptEmail: r.receipt_email || null,
+    awaitingReceiptEmail: !!r.awaiting_receipt_email,
+
+    // ✅ отзывы
     awaitingReview: !!r.awaiting_review,
     reviewPostponed: !!r.review_postponed
   };
@@ -90,9 +115,11 @@ async function upsertUser(u) {
     `INSERT INTO users (
         chat_id, is_active, program_type, current_day, support_step,
         last_morning_sent_key, last_evening_sent_key, paid_until, last_payment_id,
+        pending_payment_id, pending_plan,
+        receipt_email, awaiting_receipt_email,
         awaiting_review, review_postponed, updated_at
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())
      ON CONFLICT (chat_id) DO UPDATE SET
        is_active = EXCLUDED.is_active,
        program_type = EXCLUDED.program_type,
@@ -102,6 +129,10 @@ async function upsertUser(u) {
        last_evening_sent_key = EXCLUDED.last_evening_sent_key,
        paid_until = EXCLUDED.paid_until,
        last_payment_id = EXCLUDED.last_payment_id,
+       pending_payment_id = EXCLUDED.pending_payment_id,
+       pending_plan = EXCLUDED.pending_plan,
+       receipt_email = EXCLUDED.receipt_email,
+       awaiting_receipt_email = EXCLUDED.awaiting_receipt_email,
        awaiting_review = EXCLUDED.awaiting_review,
        review_postponed = EXCLUDED.review_postponed,
        updated_at = NOW()`,
@@ -115,6 +146,13 @@ async function upsertUser(u) {
       u.lastEveningSentKey || null,
       u.paidUntil ? new Date(u.paidUntil) : null,
       u.lastPaymentId || null,
+
+      u.pendingPaymentId || null,
+      u.pendingPlan || null,
+
+      u.receiptEmail || null,
+      !!u.awaitingReceiptEmail,
+
       !!u.awaitingReview,
       !!u.reviewPostponed
     ]
@@ -141,6 +179,13 @@ async function ensureUser(chatId) {
     lastEveningSentKey: null,
     paidUntil: null,
     lastPaymentId: null,
+
+    pendingPaymentId: null,
+    pendingPlan: null,
+
+    receiptEmail: null,
+    awaitingReceiptEmail: false,
+
     awaitingReview: false,
     reviewPostponed: false
   };
@@ -180,6 +225,57 @@ async function markDeliveryError(chatId, kind, sendKey, errorText) {
   );
 }
 
+/**
+ * Статистика доставок за конкретный день (send_key), сгруппировано по kind.
+ * Возвращает структуру, которую ждёт bot.js в /deliveries.
+ */
+async function getDeliveryStatsByDay(sendKey) {
+  const key = String(sendKey || '').trim();
+  if (!key) {
+    return {
+      sendKey: '',
+      totalAll: 0,
+      sentAll: 0,
+      errorsAll: 0,
+      byKind: {}
+    };
+  }
+
+  const res = await pool.query(
+    `
+      SELECT
+        kind,
+        COUNT(*)::int AS total,
+        COUNT(sent_at)::int AS sent,
+        COUNT(CASE WHEN error IS NOT NULL THEN 1 END)::int AS errors
+      FROM deliveries
+      WHERE send_key = $1
+      GROUP BY kind
+    `,
+    [key]
+  );
+
+  const byKind = {};
+  let totalAll = 0;
+  let sentAll = 0;
+  let errorsAll = 0;
+
+  for (const r of res.rows) {
+    const kind = String(r.kind);
+    const total = Number(r.total || 0);
+    const sent = Number(r.sent || 0);
+    const errors = Number(r.errors || 0);
+
+    byKind[kind] = { total, sent, errors };
+
+    totalAll += total;
+    sentAll += sent;
+    errorsAll += errors;
+  }
+
+  return { sendKey: key, totalAll, sentAll, errorsAll, byKind };
+}
+
 async function addReview({ chatId, text, programType, currentDay }) {
   const clean = String(text || '').trim();
   if (!clean) return null;
@@ -203,6 +299,12 @@ async function countReviews() {
   return res.rows && res.rows[0] ? Number(res.rows[0].c) : 0;
 }
 
+async function close() {
+  try {
+    await pool.end();
+  } catch (_) {}
+}
+
 module.exports = {
   init,
   getUser,
@@ -212,6 +314,8 @@ module.exports = {
   claimDelivery,
   markDeliverySent,
   markDeliveryError,
+  getDeliveryStatsByDay,
   addReview,
-  countReviews
+  countReviews,
+  close
 };
