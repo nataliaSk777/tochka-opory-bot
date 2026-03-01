@@ -1,3 +1,4 @@
+// ========================= bot.js (PART 1/4) =========================
 'use strict';
 
 require('dotenv').config();
@@ -48,7 +49,6 @@ if (!BOT_TOKEN) {
 const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID || '';
 
 // ✅ YooKassa env (поддерживаем оба набора имён переменных)
-// Ты сейчас на Railway используешь SHOP_ID и SECRET_KEY — поэтому делаем fallback.
 const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID || process.env.SHOP_ID || '';
 const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY || process.env.SECRET_KEY || '';
 
@@ -68,14 +68,10 @@ const PORT = Number(process.env.PORT || 8080);
    Telegraf webhook mode (fix 409 getUpdates conflict)
 ============================================================================ */
 
-// В проде на Railway лучше webhook (убирает 409 Conflict из-за polling/getUpdates).
-// Включаем webhook автоматически, если задан BASE_URL/PUBLIC_URL,
-// либо можно форсировать через USE_WEBHOOK=true/false.
 const USE_WEBHOOK = (process.env.USE_WEBHOOK != null)
   ? /^(1|true|yes)$/i.test(String(process.env.USE_WEBHOOK))
   : Boolean(BASE_URL);
 
-// Чтобы не светить BOT_TOKEN в URL — делаем стабильный секретный путь из sha256(token).
 function makeWebhookPathFromToken(token) {
   const h = crypto.createHash('sha256').update(String(token)).digest('hex');
   return `/telegraf/${h.slice(0, 32)}`;
@@ -105,9 +101,7 @@ function parseBasicAuth(req) {
 }
 
 function checkWebhookAuth(req) {
-  // Если логин/пароль не заданы — не требуем auth (удобно на старте)
   if (!YOOKASSA_WEBHOOK_USER && !YOOKASSA_WEBHOOK_PASS) return true;
-
   const creds = parseBasicAuth(req);
   if (!creds) return false;
   return creds.user === YOOKASSA_WEBHOOK_USER && creds.pass === YOOKASSA_WEBHOOK_PASS;
@@ -150,7 +144,6 @@ function makeIdempotencyKey() {
   return crypto.randomBytes(16).toString('hex');
 }
 
-// ✅ email для чека (54-ФЗ) — часто обязателен, иначе createPayment падает
 function isValidEmail(s) {
   const t = String(s || '').trim();
   if (t.length < 6 || t.length > 200) return false;
@@ -182,8 +175,6 @@ async function createPayment30Days(chatId, receiptEmail) {
         plan: 'paid_30',
         chatId: String(chatId)
       },
-
-      // ✅ ЧЕК (54-ФЗ): во многих магазинах без receipt платеж не создаётся
       receipt: {
         customer: { email: String(receiptEmail).trim() },
         items: [
@@ -250,12 +241,11 @@ function moscowDayKey(d = new Date()) {
 }
 
 /* ============================================================================
-   Bot instance (ВАЖНО: объявляем ДО любых bot.launch / bot.telegram)
+   Bot instance
 ============================================================================ */
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// ✅ глобальный перехват ошибок Telegraf (чтобы не терять апдейты в тишине)
 bot.catch((err, ctx) => {
   console.error('[telegraf] error', {
     updateType: ctx && ctx.updateType,
@@ -288,16 +278,14 @@ function isOwnerStrict(ctx) {
 }
 
 /* ============================================================================
-   Day Return (anti “lost among chats”): seed + router + sender
+   Day Return (anti “lost among chats”)
 ============================================================================ */
 
 function dayReturnSeed(ctx) {
-  // стабильный seed в течение дня по Москве + уникальность чата
   const p = moscowParts(new Date());
   const chatId = ctx && ctx.chat && ctx.chat.id ? Number(ctx.chat.id) : 0;
   const base = `${p.key}:${Number.isFinite(chatId) ? chatId : 0}`;
 
-  // простой стабильный хэш в число
   let h = 0;
   for (let i = 0; i < base.length; i += 1) {
     h = ((h << 5) - h) + base.charCodeAt(i);
@@ -317,7 +305,6 @@ function dayReturnText(kind, seed) {
 async function sendDayReturn(ctx, kind) {
   const u = await store.ensureUser(ctx.chat.id);
 
-  // Если человек сейчас пишет отзыв — не уводим в “паузы”
   if (u && u.awaitingReview) {
     await ctx.reply(
       [
@@ -345,8 +332,6 @@ async function sendDayReturn(ctx, kind) {
 /* ============================================================================
    Texts
 ============================================================================ */
-
-// ================= SAFETY (10/10, мягко и без давления) =================
 
 const SAFETY_INTRO = `Этот бот помогает мягко возвращать внимание к телу и немного замедляться.
 
@@ -505,7 +490,6 @@ function subscriptionText(u) {
    UI
 ============================================================================ */
 
-// 🔒 “Начать заново” показываем ТОЛЬКО в free (чтобы не было риска случайно сбросить paid/support)
 function mainKeyboard(u) {
   if (!isActiveProgram(u)) {
     return Markup.inlineKeyboard([
@@ -517,7 +501,6 @@ function mainKeyboard(u) {
     ]);
   }
 
-  // active
   if (u && u.programType === 'free') {
     return Markup.inlineKeyboard([
       [Markup.button.callback('⛔️ Остановить', 'STOP')],
@@ -529,7 +512,6 @@ function mainKeyboard(u) {
     ]);
   }
 
-  // paid / support
   return Markup.inlineKeyboard([
     [Markup.button.callback('⛔️ Остановить', 'STOP')],
     [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
@@ -568,7 +550,6 @@ function subscriptionKeyboard(u) {
   return mainKeyboard(u);
 }
 
-// ✅ Клавиатура после остановки: “вернуться” одним нажатием
 function stoppedKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🌿 Вернуться', 'RESUME')],
@@ -579,12 +560,62 @@ function stoppedKeyboard() {
   ]);
 }
 
-// ✅ Клавиатура для ввода email (чек)
 function receiptEmailKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('⬅️ Назад', 'BACK')]
   ]);
 }
+
+/* ============================================================================
+   Crisis contacts by country (buttons + saved choice)
+============================================================================ */
+
+function countryKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🇷🇺 Россия', 'COUNTRY_RU'), Markup.button.callback('🇺🇦 Украина', 'COUNTRY_UA')],
+    [Markup.button.callback('🇪🇺 Европа (112)', 'COUNTRY_EU'), Markup.button.callback('🇺🇸 США', 'COUNTRY_US')],
+    [Markup.button.callback('🇦🇺 Австралия', 'COUNTRY_AU')],
+    [Markup.button.callback('🌍 Другая страна', 'COUNTRY_OTHER')],
+    [Markup.button.callback('⬅️ Назад', 'BACK')]
+  ]);
+}
+
+function emergencyContactsText(countryCode) {
+  const code = String(countryCode || '').toUpperCase();
+
+  if (code === 'RU') {
+    return [
+      '📞 Экстренные службы (Россия):',
+      '— 112 (единый номер)',
+      '',
+      'Если ситуация угрожает жизни — лучше звонить сразу.'
+    ].join('\n');
+  }
+
+  if (code === 'UA') {
+    return [
+      '📞 Экстренные службы (Украина):',
+      '— 112 (единый номер)',
+      '— 101 (пожарные/спасатели)',
+      '— 102 (полиция)',
+      '— 103 (скорая)',
+      '',
+      'Если ситуация угрожает жизни — лучше звонить сразу.'
+    ].join('\n');
+  }
+
+  if (code === 'EU') {
+    return [
+      '📞 Экстренные службы (Европа):',
+      '— 112 (единый номер)',
+      '',
+      'Если ситуация угрожает жизни — лучше звонить сразу.'
+    ].join('\n');
+  }
+
+  if (code === 'US') {
+    return [
+     // ========================= bot.js (PART 2/4) =========================
 /* ============================================================================
    Safety: self-harm / crisis trigger (soft routing)
 ============================================================================ */
@@ -597,7 +628,7 @@ function normalizeText(s) {
     .trim();
 }
 
-// Базовые триггеры (на русском). Список намеренно короткий и “очевидный”, чтобы меньше ложных срабатываний.
+// Базовые триггеры (на русском). Список короткий, чтобы меньше ложных срабатываний.
 function looksLikeSelfHarmCrisis(text) {
   const t = normalizeText(text);
   if (!t) return false;
@@ -628,7 +659,6 @@ function looksLikeSelfHarmCrisis(text) {
   ];
 
   if (falsePositives.some(r => r.test(t))) return false;
-
   return patterns.some(r => r.test(t));
 }
 
@@ -654,7 +684,7 @@ bot.on('text', async (ctx, next) => {
     if (msg.trim().startsWith('/')) return next();
 
     if (looksLikeSelfHarmCrisis(msg)) {
-      // Если вдруг ждали отзыв — снимаем ожидание, чтобы не смешивать режимы
+      // Если ждали отзыв — снимаем ожидание, чтобы не смешивать режимы
       try {
         const u = await store.getUser(ctx.chat.id);
         if (u && u.awaitingReview) {
@@ -662,10 +692,15 @@ bot.on('text', async (ctx, next) => {
           u.reviewPostponed = true;
           await store.upsertUser(u);
         }
+        // И если ждали email — тоже снимаем
+        if (u && u.awaitingReceiptEmail) {
+          u.awaitingReceiptEmail = false;
+          await store.upsertUser(u);
+        }
       } catch (_) {}
 
       await replySafetySupport(ctx);
-      return; // стопаем дальнейшие обработчики
+      return;
     }
 
     return next();
@@ -676,7 +711,7 @@ bot.on('text', async (ctx, next) => {
 });
 
 /* ============================================================================
-   Debug
+   Debug commands
 ============================================================================ */
 
 function shortUserLine(u) {
@@ -714,7 +749,6 @@ bot.command('dbtest', async (ctx) => {
     const chatId = ctx.chat.id;
 
     const before = (await store.getUser(chatId)) || (await store.ensureUser(chatId));
-
     before.dbTestCounter = Number(before.dbTestCounter || 0) + 1;
     before.dbTestLastAt = new Date().toISOString();
     await store.upsertUser(before);
@@ -776,10 +810,13 @@ bot.action('REVIEW_WRITE', async (ctx) => {
       'Можно одним сообщением.',
       'Без “правильно/неправильно”.'
     ].join('\n'),
-    reviewKeyboard()
+    Markup.inlineKeyboard([
+      [Markup.button.callback('Позже', 'REVIEW_LATER')]
+    ])
   );
 });
 
+// Сбор текста отзыва
 bot.on('text', async (ctx, next) => {
   try {
     if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
@@ -804,7 +841,7 @@ bot.on('text', async (ctx, next) => {
       currentDay: u.currentDay
     });
 
-    await ctx.reply('Спасибо. Я сохранила. 🫶');
+    await ctx.reply('Спасибо. Я сохранила. 🫶', mainKeyboard(u));
 
     const ownerId = OWNER_CHAT_ID ? Number(OWNER_CHAT_ID) : NaN;
     if (Number.isFinite(ownerId)) {
@@ -870,7 +907,6 @@ bot.on('text', async (ctx, next) => {
     u.awaitingReceiptEmail = false;
     await store.upsertUser(u);
 
-    // ✅ сразу создаём оплату
     try {
       const { url, paymentId } = await createPayment30Days(ctx.chat.id, u.receiptEmail);
 
@@ -904,6 +940,76 @@ bot.on('text', async (ctx, next) => {
   }
 });
 
+/* ============================================================================
+   Country choice handlers (saved to DB)
+============================================================================ */
+
+bot.action('COUNTRY_RU', async (ctx) => setCountryAndShow(ctx, 'RU'));
+bot.action('COUNTRY_UA', async (ctx) => setCountryAndShow(ctx, 'UA'));
+bot.action('COUNTRY_EU', async (ctx) => setCountryAndShow(ctx, 'EU'));
+bot.action('COUNTRY_US', async (ctx) => setCountryAndShow(ctx, 'US'));
+bot.action('COUNTRY_AU', async (ctx) => setCountryAndShow(ctx, 'AU'));
+
+bot.action('COUNTRY_OTHER', async (ctx) => {
+  const u = await store.ensureUser(ctx.chat.id);
+  u.awaitingCountryCode = true;
+  await store.upsertUser(u);
+  await safeAnswerCbQuery(ctx);
+
+  await ctx.reply(
+    [
+      'Напиши, пожалуйста, страну одним сообщением.',
+      'Например: Казахстан / Израиль / Германия.',
+      '',
+      'Я подскажу экстренный номер и где искать линии помощи.'
+    ].join('\n'),
+    Markup.inlineKeyboard([
+      [Markup.button.callback('⬅️ Назад', 'BACK')]
+    ])
+  );
+});
+
+// Если пользователь написал страну текстом
+bot.on('text', async (ctx, next) => {
+  try {
+    if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
+    const text = ctx.message.text.trim();
+    if (!text) return next();
+
+    if (text.startsWith('/')) return next();
+    if (/^стоп$/i.test(text)) return next();
+
+    const u = await store.getUser(ctx.chat.id);
+    if (!u || !u.awaitingCountryCode) return next();
+
+    // не мешаем другим режимам
+    if (u.awaitingReview || u.awaitingReceiptEmail) return next();
+
+    u.awaitingCountryCode = false;
+    u.countryName = text;
+    await store.upsertUser(u);
+
+    await ctx.reply(
+      [
+        'Спасибо.',
+        '',
+        `Страна: ${text}`,
+        '',
+        'Если угроза жизни — лучше набрать местный номер экстренных служб.',
+        'Во многих странах это 112, но не везде.',
+        '',
+        'Если хочешь — напиши город/регион, и я уточню точный номер.'
+      ].join('\n'),
+      Markup.inlineKeyboard([[Markup.button.callback('⬅️ Назад', 'BACK')]])
+    );
+    return;
+  } catch (e) {
+    console.error('[country] handler error', e && e.message ? e.message : e);
+    return next();
+  }
+});
+// ========================= end PART 2/4 =========================
+  // ========================= bot.js (PART 3/4) =========================
 /* ============================================================================
    Admin stats / manual ticks
 ============================================================================ */
@@ -1011,22 +1117,45 @@ bot.action('NEED_HELP', async (ctx) => {
   await ctx.reply(
     SAFETY_SUPPORT_TEXT,
     Markup.inlineKeyboard([
-      [Markup.button.callback('📞 Где найти помощь', 'HELP_RESOURCES')],
+      [Markup.button.callback('📞 Экстренные контакты', 'HELP_RESOURCES')],
       [Markup.button.callback('⬅️ Назад', 'BACK')]
     ])
   );
 });
 
 bot.action('HELP_RESOURCES', async (ctx) => {
-  await store.ensureUser(ctx.chat.id);
+  const u = await store.ensureUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
 
+  // Если страна уже сохранена — сразу показываем нужный блок
+  const cc = (u && u.countryCode) ? String(u.countryCode) : '';
+  if (cc) {
+    const t = safetyContactsTextByCountryCode(cc);
+    await ctx.reply(
+      t,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('🌍 Сменить страну', 'CHOOSE_COUNTRY')],
+        [Markup.button.callback('⬅️ Назад', 'BACK')]
+      ])
+    );
+    return;
+  }
+
+  // Иначе предлагаем выбрать страну
   await ctx.reply(
-    SAFETY_RESOURCES_TEXT,
-    Markup.inlineKeyboard([
-      [Markup.button.callback('⬅️ Назад', 'BACK')]
-    ])
+    [
+      'Чтобы подсказать экстренные контакты — выбери страну:',
+      '',
+      'Если угроза жизни — лучше звонить в экстренные службы прямо сейчас.'
+    ].join('\n'),
+    countryKeyboard()
   );
+});
+
+bot.action('CHOOSE_COUNTRY', async (ctx) => {
+  await store.ensureUser(ctx.chat.id);
+  await safeAnswerCbQuery(ctx);
+  await ctx.reply('Выбери страну:', countryKeyboard());
 });
 
 // ================= DAY RETURN HANDLERS =================
@@ -1046,7 +1175,7 @@ bot.action('DAY_SUPPORT', async (ctx) => {
   await sendDayReturn(ctx, 'support');
 });
 
-// ================= BASE FLOW =================
+// ================= BASIC UI =================
 
 bot.start(async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
@@ -1063,9 +1192,10 @@ bot.action('BACK', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
 
-  // ✅ чтобы не “залипать” в режиме ввода email
+  // чтобы не “залипать” в режимах ввода
   if (u) {
     u.awaitingReceiptEmail = false;
+    u.awaitingCountryCode = false;
     await store.upsertUser(u);
   }
 
@@ -1094,8 +1224,9 @@ bot.action('START_FREE', async (ctx) => {
   u.lastMorningSentKey = null;
   u.lastEveningSentKey = null;
 
-  // ✅ сброс режимов ввода
+  // сброс режимов ввода
   u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
 
   await store.upsertUser(u);
 
@@ -1107,7 +1238,7 @@ bot.action('START_FREE', async (ctx) => {
   await ctx.reply(afterStartText(), mainKeyboard(u));
 });
 
-// 🔄 RESTART: доступен только в free (в UI мы его показываем только там, но и тут проверим)
+// 🔄 RESTART: доступен только в free
 bot.action('RESTART', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
 
@@ -1127,8 +1258,8 @@ bot.action('RESTART', async (ctx) => {
   u.pendingPaymentId = null;
   u.pendingPlan = null;
 
-  // ✅ сброс режимов ввода
   u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
 
   await store.upsertUser(u);
 
@@ -1143,7 +1274,6 @@ bot.action('RESTART', async (ctx) => {
 bot.action('RESUME', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
 
-  // Если вообще нет типа — безопасно предложим старт
   if (!u || !u.programType || u.programType === 'none') {
     await safeAnswerCbQuery(ctx);
     await ctx.reply(startText(), mainKeyboard(u));
@@ -1151,15 +1281,16 @@ bot.action('RESUME', async (ctx) => {
   }
 
   u.isActive = true;
+  u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
 
-  // НЕ трогаем currentDay / supportStep / sentKey — чтобы продолжить с того же места
   await store.upsertUser(u);
 
   await safeAnswerCbQuery(ctx);
   await ctx.reply(backText(), mainKeyboard(u));
 });
 
-// ✅ BUY_30: создаём платёж и отдаём пользователю ссылку (лучший UX)
+// ✅ BUY_30: создаём платёж и отдаём ссылку
 bot.action('BUY_30', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
@@ -1181,7 +1312,7 @@ bot.action('BUY_30', async (ctx) => {
     return;
   }
 
-  // ✅ если email для чека ещё не сохранён — попросим
+  // Если email ещё не сохранён — попросим
   if (!u.receiptEmail) {
     u.awaitingReceiptEmail = true;
     await store.upsertUser(u);
@@ -1237,8 +1368,8 @@ bot.action('START_SUPPORT', async (ctx) => {
   u.lastMorningSentKey = null;
   u.lastEveningSentKey = null;
 
-  // ✅ сброс режимов ввода
   u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
 
   await store.upsertUser(u);
 
@@ -1253,6 +1384,7 @@ async function stopProgram(ctx) {
   const u = await store.ensureUser(ctx.chat.id);
   u.isActive = false;
   u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
   await store.upsertUser(u);
   await ctx.reply(stoppedText(), stoppedKeyboard());
 }
@@ -1277,7 +1409,11 @@ bot.command('back', async (ctx) => sendDayReturn(ctx, 'back'));
 // Русские варианты (удобны для пользователя)
 bot.hears(/^(пауза|стоп ?на ?секунду)$/i, async (ctx) => sendDayReturn(ctx, 'pause'));
 bot.hears(/^(проверить себя|проверка|чек|скан)$/i, async (ctx) => sendDayReturn(ctx, 'check'));
-bot.hears(/^(поддержка|мне тяжело|плохо)$/i, async (ctx) => sendDayReturn(ctx, 'support'));
+bot.hears(/^(поддержка)$/i, async (ctx) => sendDayReturn(ctx, 'support'));
+
+// ========================= end PART 3/4 =========================
+
+  // ========================= bot.js (PART 4/4) =========================
 /* ============================================================================
    HTTP server: healthcheck + telegraf webhook + yookassa webhook + success page
 ============================================================================ */
@@ -1292,7 +1428,7 @@ const server = http.createServer(async (req, res) => {
     const method = String(req.method || 'GET').toUpperCase();
     const url = String(req.url || '/');
 
-    // ✅ Явный healthcheck (для Railway)
+    // ✅ healthcheck (Railway)
     if (method === 'GET' && (url === '/' || url.startsWith('/health'))) {
       writeText(res, 200, 'ok');
       return;
@@ -1327,7 +1463,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // ✅ Всегда отвечаем 200 ЮKassa, даже если body кривой (они ретраят)
+      // ✅ Всегда отвечаем 200 YooKassa, даже если body кривой (они ретраят)
       let event = null;
       try {
         event = await readJsonBody(req);
@@ -1355,7 +1491,7 @@ const server = http.createServer(async (req, res) => {
           if (plan === 'paid_30') {
             const u = await store.ensureUser(chatId);
 
-            // идемпотентность: если уже paid/support — не дёргаем
+            // идемпотентность: если уже paid — не дёргаем
             if (u && u.programType !== 'paid') {
               u.isActive = true;
               u.programType = 'paid';
@@ -1368,8 +1504,12 @@ const server = http.createServer(async (req, res) => {
               u.pendingPaymentId = null;
               u.pendingPlan = null;
 
-              // ✅ не трогаем receiptEmail: пригодится на будущее
+              // режимы ввода выключаем
               u.awaitingReceiptEmail = false;
+              u.awaitingCountryCode = false;
+
+              // сохраняем id платежа
+              u.lastPaymentId = payment && payment.id ? String(payment.id) : (u.lastPaymentId || null);
 
               await store.upsertUser(u);
 
@@ -1393,6 +1533,8 @@ const server = http.createServer(async (req, res) => {
               u.pendingPaymentId = null;
               u.pendingPlan = null;
               u.awaitingReceiptEmail = false;
+              u.awaitingCountryCode = false;
+              u.lastPaymentId = payment && payment.id ? String(payment.id) : (u.lastPaymentId || null);
               await store.upsertUser(u);
             }
           }
@@ -1414,6 +1556,7 @@ const server = http.createServer(async (req, res) => {
               u.pendingPaymentId = null;
               u.pendingPlan = null;
               u.awaitingReceiptEmail = false;
+              u.awaitingCountryCode = false;
               await store.upsertUser(u);
             }
           }
@@ -1425,13 +1568,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Return_url page
+    // Return_url page (после оплаты YooKassa редиректит сюда)
     if (method === 'GET' && url.startsWith('/success')) {
       writeText(res, 200, 'Оплата принята. Можно вернуться в Telegram.');
       return;
     }
 
-    // ✅ Остальное — 404 (лучше для диагностики)
+    // Остальное — 404
     writeText(res, 404, 'not found');
   } catch (e) {
     console.error('[http] error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
@@ -1560,7 +1703,7 @@ let eveningTask = null;
 async function boot() {
   await store.init();
 
-  // ✅ Запуск Telegraf: webhook в проде (убирает 409), polling оставляем только для локальной отладки
+  // ✅ Telegraf: webhook в проде, polling — только для локальной отладки
   if (USE_WEBHOOK) {
     const base = String(BASE_URL || '').replace(/\/$/, '');
     if (!base) {
@@ -1569,13 +1712,11 @@ async function boot() {
 
     const fullUrl = `${base}${TELEGRAM_WEBHOOK_PATH}`;
 
-    // Убедимся, что polling не будет мешать: ставим webhook (Telegram сам отключает getUpdates сценарий).
     await bot.telegram.setWebhook(fullUrl, { drop_pending_updates: true });
 
     console.log('BOT: webhook enabled');
     console.log('[telegram] webhook url:', fullUrl);
   } else {
-    // Локальный режим (если очень нужно): polling
     await bot.launch({ dropPendingUpdates: true });
     console.log('BOT: polling enabled');
   }
@@ -1599,4 +1740,35 @@ async function boot() {
   const p = moscowParts(new Date());
   console.log('[scheduler] now MSK:', p.isoLike, 'dayKey=', p.key);
 
-  console.log('[payments] enabled=', havePaymentsEnabled(), 'shopId=', YOOKASSA_SHOP
+  console.log(
+    '[payments] enabled=',
+    havePaymentsEnabled(),
+    'shopId=',
+    YOOKASSA_SHOP_ID ? 'set' : 'missing',
+    'baseUrl=',
+    BASE_URL ? BASE_URL : 'missing'
+  );
+  console.log('[payments] webhook basic auth', (YOOKASSA_WEBHOOK_USER || YOOKASSA_WEBHOOK_PASS) ? 'enabled' : 'disabled');
+  console.log('[payments] webhook path: /yookassa-webhook');
+}
+
+boot().catch((e) => {
+  console.error('BOOT FAILED:', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+  process.exit(1);
+});
+
+function shutdown(signal) {
+  try { if (morningTask) morningTask.stop(); } catch (_) {}
+  try { if (eveningTask) eveningTask.stop(); } catch (_) {}
+  try { if (stopWatchdog) stopWatchdog(); } catch (_) {}
+
+  try { bot.stop(signal); } catch (_) {}
+  try { if (server) server.close(() => {}); } catch (_) {}
+
+  try { if (store && typeof store.close === 'function') store.close(); } catch (_) {}
+}
+
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+
+// ========================= end PART 4/4 =========================
