@@ -60,6 +60,77 @@ const HAIKU = [
 спокойней`
 ];
 
+// ================= TRANSITIONS (10/10 UX) =================
+// (поддерживают плавные переходы между состояниями программы)
+
+const TRANSITIONS = {
+  // прогрев перед оплатой
+  preparePaymentDay6: `Ты уже несколько дней возвращаешь внимание в тело.
+
+Заметь, стало ли чуть спокойнее внутри.
+Чуть яснее?
+
+Это не всегда заметно сразу,
+но накапливается очень точно.
+
+Завтра я предложу продолжить — чуть глубже.
+Но ты сам(а) решишь, идти дальше или остановиться.`,
+
+  // последний бесплатный день (мягкое приглашение)
+  lastFreeDay7: `Сегодня последний день в этом формате.
+
+Ты уже сделал(а) важное:
+чуть ближе к себе,
+чуть внимательнее к сигналам внутри.
+
+Дальше можно продолжить —
+в том же спокойном ритме, но глубже.
+
+Я буду рядом ещё 30 дней.`,
+
+  // подготовка к поддержке
+  prepareSupportDay29: `Ты прошёл(ла) большой путь.
+
+Важно не количество шагов,
+а то, что теперь у тебя есть контакт с собой.
+
+Это то, что остаётся.
+
+Завтра формат немного изменится —
+станет мягче.`,
+
+  // переход в поддержку
+  transitionToSupportDay30: `Основная часть завершена.
+
+Ты уже умеешь останавливаться,
+замечать,
+возвращаться к себе.
+
+Дальше я остаюсь рядом —
+но мягче, реже.
+
+Как точка опоры,
+к которой можно возвращаться.`,
+
+  // вход в поддержку (первый шаг)
+  supportEntry: `Теперь это пространство —
+не про движение вперёд.
+
+А про возвращение.
+
+Иногда достаточно одного выдоха,
+чтобы снова оказаться в себе.`,
+
+  // мягкое сообщение, если нужно отдельное “прощание” с free
+  softExitAfterFree: `Это тоже ок.
+
+Ты уже взял(а) из этого периода то,
+что было нужно сейчас.
+
+Если захочешь вернуться —
+я буду здесь.`
+};
+
 // 2–3 раза в неделю: вечером добавляем хокку автоматически
 const EVENING_HAIKU_DAYS = {
   free: new Set([2, 4, 6]),
@@ -68,7 +139,8 @@ const EVENING_HAIKU_DAYS = {
 
 function pickHaiku(programType, day) {
   const d = Number(day || 1);
-  const idx = Math.abs(d) % HAIKU.length;
+  // FIX: чтобы день 1 выбирал 1-е хокку, а не 2-е
+  const idx = Math.abs(d - 1) % HAIKU.length;
   const h = HAIKU[idx];
   if (!h) return null;
 
@@ -264,26 +336,49 @@ const SUPPORT_EVENING = [
 ];
 
 function getMorningText(programType, day, supportStep) {
-  if (programType === 'free') return FREE_MORNING[Number(day)] || null;
-  if (programType === 'paid') return PAID_MORNING[Number(day)] || null;
+  const d = Number(day);
+
+  // Плавные переходы (утро)
+  if (programType === 'free' && d === 6) return TRANSITIONS.preparePaymentDay6;
+  if (programType === 'free' && d === 7) return TRANSITIONS.lastFreeDay7;
+
+  // В платной части подготовку/переход логичнее дать вечером (см. getEveningText),
+  // но иногда удобно продублировать утром — оставлю только по необходимости.
   if (programType === 'support') {
-    const idx = (Math.max(1, Number(supportStep || 1)) - 1) % SUPPORT_MORNING.length;
+    const st = Math.max(1, Number(supportStep || 1));
+    if (st === 1) return TRANSITIONS.supportEntry;
+
+    const idx = (st - 1) % SUPPORT_MORNING.length;
     return SUPPORT_MORNING[idx];
   }
+
+  if (programType === 'free') return FREE_MORNING[d] || null;
+  if (programType === 'paid') return PAID_MORNING[d] || null;
+
   return null;
 }
 
 function getEveningText(programType, day, supportStep) {
   const d = Number(day);
+
+  // Плавные переходы (вечер)
+  // вместо 29/30:
+if (programType === 'paid' && d === 34) return withHaiku('paid', d, TRANSITIONS.prepareSupportDay29);
+if (programType === 'paid' && d === 35) return withHaiku('paid', d, TRANSITIONS.transitionToSupportDay30);
+
   if (programType === 'free') return withHaiku('free', d, FREE_EVENING[d] || null);
   if (programType === 'paid') return withHaiku('paid', d, PAID_EVENING[d] || null);
+
   if (programType === 'support') {
-    const idx = (Math.max(1, Number(supportStep || 1)) - 1) % SUPPORT_EVENING.length;
+    const st = Math.max(1, Number(supportStep || 1));
+    const idx = (st - 1) % SUPPORT_EVENING.length;
     // поддержка: хокку не добавляем, чтобы не перегружать режим; но можно включить при желании
     return SUPPORT_EVENING[idx];
   }
+
   return null;
 }
+
 // ================= DAY RETURN (anti “lost among chats”) =================
 
 const DAY_RETURN = {
@@ -322,7 +417,7 @@ const DAY_RETURN = {
 
 function pickFrom(arr, seed) {
   const s = Math.max(1, Number(seed || 1));
-  const idx = Math.abs(s) % arr.length;
+  const idx = Math.abs(s - 1) % arr.length;
   return arr[idx];
 }
 
@@ -346,6 +441,7 @@ module.exports = {
   IF_NOT_FEELING,
   HAIKU,
   EVENING_HAIKU_DAYS,
+  TRANSITIONS,
 
   FREE_MORNING,
   FREE_EVENING,
@@ -354,6 +450,13 @@ module.exports = {
   SUPPORT_MORNING,
   SUPPORT_EVENING,
 
+  // main getters
   getMorningText,
-  getEveningText
+  getEveningText,
+
+  // day return helpers (FIX: раньше не экспортировались)
+  getPauseText,
+  getCheckText,
+  getSupportText,
+  getBackText
 };
