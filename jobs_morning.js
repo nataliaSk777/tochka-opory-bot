@@ -9,21 +9,69 @@ function shouldSend(u, key) {
   return Boolean(u && u.isActive && u.lastMorningSentKey !== key);
 }
 
+function normInt(v, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * Двигаем программу ПОСЛЕ успешной отправки утреннего сообщения.
+ * ВАЖНО: на границах (free day 7, paid day 35) утром не двигаем day,
+ * чтобы не было сдвигов и чтобы переход/оплата/переключение делались в своих местах.
+ */
 function advanceAfterMorning(u) {
   if (!u) return;
 
   if (u.programType === 'free') {
-    if (Number(u.currentDay || 1) < 7) u.currentDay = Number(u.currentDay || 1) + 1;
+    const d = normInt(u.currentDay, 1);
+
+    // защита от мусора
+    if (d <= 0) {
+      u.currentDay = 1;
+      return;
+    }
+    if (d > 7) {
+      u.currentDay = 7;
+      return;
+    }
+
+    // граница: день 7 не двигаем утром
+    if (d === 7) {
+      u.currentDay = 7;
+      return;
+    }
+
+    u.currentDay = d + 1;
     return;
   }
 
   if (u.programType === 'paid') {
-    if (Number(u.currentDay || 8) < 35) u.currentDay = Number(u.currentDay || 8) + 1;
+    const d = normInt(u.currentDay, 8);
+
+    // защита от мусора
+    if (d < 8) {
+      u.currentDay = 8;
+      return;
+    }
+    if (d > 35) {
+      // если вдруг “улетели” — фиксируем на 35, дальше перевод в support должен сделать вечерний джоб
+      u.currentDay = 35;
+      return;
+    }
+
+    // граница: день 35 не двигаем утром
+    if (d === 35) {
+      u.currentDay = 35;
+      return;
+    }
+
+    u.currentDay = d + 1;
     return;
   }
 
   if (u.programType === 'support') {
-    u.supportStep = Math.max(1, Number(u.supportStep || 1) + 1);
+    const st = normInt(u.supportStep, 1);
+    u.supportStep = Math.max(1, st + 1);
   }
 }
 
@@ -109,6 +157,11 @@ async function runMorning(bot) {
         if (!ok) continue;
       }
 
+      // небольшая нормализация перед выбором текста (чтобы не было NaN/undefined)
+      if (u.programType === 'free') u.currentDay = normInt(u.currentDay, 1);
+      if (u.programType === 'paid') u.currentDay = normInt(u.currentDay, 8);
+      if (u.programType === 'support') u.supportStep = Math.max(1, normInt(u.supportStep, 1));
+
       const text = getMorningText(u.programType, u.currentDay, u.supportStep);
       if (!text) continue;
 
@@ -124,11 +177,8 @@ async function runMorning(bot) {
       await maybeAskReview(bot, u, key);
       await maybeRemindReview(bot, u, key);
 
-      const isBoundary =
-        (u.programType === 'free' && Number(u.currentDay) === 7) ||
-        (u.programType === 'paid' && Number(u.currentDay) === 35);
-
-      if (!isBoundary) advanceAfterMorning(u);
+      // ✅ единое место правды: advanceAfterMorning сам знает, когда НЕ двигать дни на границах
+      advanceAfterMorning(u);
 
       await store.upsertUser(u);
       sent += 1;
