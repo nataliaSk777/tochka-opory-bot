@@ -1,3 +1,4 @@
+
 // ========================= bot.js (PART 1/4) =========================
 'use strict';
 
@@ -275,6 +276,157 @@ function isOwnerStrict(ctx) {
   const ownerId = Number(ownerIdRaw);
   if (!Number.isFinite(ownerId)) return false;
   return !!(ctx && ctx.chat && ctx.chat.id === ownerId);
+}
+
+/* ============================================================================
+   FIRST IMPRESSION 10/10 (on /start)
+   - без session middleware: держим состояние в памяти процесса (Map)
+   - не ломает остальной код, не требует миграций БД
+============================================================================ */
+
+const firstImpression = new Map(); // chatId -> { step, mood, palms, startedAt }
+const fiTimers = new Map(); // chatId -> timeoutId
+
+function fiClearTimer(chatId) {
+  const id = Number(chatId);
+  if (!Number.isFinite(id)) return;
+  const t = fiTimers.get(id);
+  if (t) {
+    try { clearTimeout(t); } catch (_) {}
+    fiTimers.delete(id);
+  }
+}
+
+function fiSetTimer(chatId, fn, ms) {
+  const id = Number(chatId);
+  if (!Number.isFinite(id)) return;
+  fiClearTimer(id);
+  const t = setTimeout(() => {
+    try { fn(); } catch (_) {}
+  }, ms);
+  fiTimers.set(id, t);
+}
+
+function fiNudgeKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('↩️ Продолжим', 'FI_CONTINUE')],
+    [Markup.button.callback('🏠 Меню', 'FI_MENU')]
+  ]);
+}
+
+async function fiSendNudgeIfStill(chatId) {
+  const st = fiGet(chatId);
+  if (!st) return;
+
+  // если сценарий уже завершён/сброшен — не трогаем
+  if (!['mood_asked', 'palms_asked', 'end_asked'].includes(st.step)) return;
+
+  let u = null;
+  try { u = await store.ensureUser(chatId); } catch (_) {}
+
+  const text = [
+    'Я тут.',
+    '',
+    'Можно продолжить — или вернуться в меню.'
+  ].join('\n');
+
+  try {
+    await bot.telegram.sendMessage(chatId, text, fiNudgeKeyboard());
+  } catch (_) {}
+
+  // на всякий — если человек хочет просто меню без кнопок
+  // (не спамим: это одно сообщение-подхват)
+  try { void u; } catch (_) {}
+}
+function fiGet(chatId) {
+  const id = Number(chatId);
+  if (!Number.isFinite(id)) return null;
+  return firstImpression.get(id) || null;
+}
+
+function fiReset(chatId) {
+  const id = Number(chatId);
+  if (!Number.isFinite(id)) return;
+  fiClearTimer(id);
+  firstImpression.delete(id);
+}
+
+function fiEnsure(chatId) {
+  const id = Number(chatId);
+  if (!Number.isFinite(id)) return null;
+
+  let st = firstImpression.get(id);
+  if (!st) {
+    st = { step: 'idle', mood: null, palms: null, startedAt: Date.now() };
+    firstImpression.set(id, st);
+  }
+  return st;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function sendWithPace(ctx, text, ms = 900) {
+  if (!ctx || !ctx.chat || !ctx.chat.id) return;
+  await ctx.reply(text, { disable_web_page_preview: true });
+  await sleep(ms);
+}
+
+function fiMoodKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('😮‍💨 немного напряжена', 'FI_MOOD_TENSE')],
+    [Markup.button.callback('🥱 устала', 'FI_MOOD_TIRED')],
+    [Markup.button.callback('🌿 спокойно', 'FI_MOOD_CALM')],
+    [Markup.button.callback('🤷‍♀️ не понимаю', 'FI_MOOD_UNSURE')]
+  ]);
+}
+
+function fiPalmsKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🔥 тёплые', 'FI_PALMS_WARM')],
+    [Markup.button.callback('❄️ прохладные', 'FI_PALMS_COOL')],
+    [Markup.button.callback('🙂 нейтрально', 'FI_PALMS_NEUTRAL')],
+    [Markup.button.callback('🤷‍♀️ сложно сказать', 'FI_PALMS_UNSURE')]
+  ]);
+}
+
+function fiEndKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('✨ хочу ещё', 'FI_MORE')],
+    [Markup.button.callback('✅ достаточно', 'FI_DONE')]
+  ]);
+}
+
+function fiMirrorMood(mood) {
+  if (mood === 'tired') return 'Тогда давай очень мягко. Без усилия. Только заметить.';
+  if (mood === 'tense') return 'Ок. Тогда мы не “расслабляемся”, а просто чуть уменьшаем давление внутри.';
+  if (mood === 'calm') return 'Супер. Тогда сохраним это состояние — аккуратно, без разгона.';
+  return 'Нормально, что сейчас непонятно. Давай без “правильных” ощущений — просто отметим факт.';
+}
+
+function fiHaiku() {
+  return `Тихий выдох
+плечи опускаются
+внутри яснее`;
+}
+
+async function runFirstImpression(ctx) {
+  const st = fiEnsure(ctx.chat.id);
+  if (!st) return;
+
+  // анти-двойной запуск
+  if (st.step !== 'idle') return;
+
+  st.step = 'mood_asked';
+
+  await sendWithPace(ctx, '…', 800);
+  await sendWithPace(ctx, 'Ты здесь.', 900);
+  await sendWithPace(ctx, 'Сейчас можно чуть выдохнуть.', 900);
+
+  await ctx.reply('Как ты сейчас?', fiMoodKeyboard());
+  // мягкий автоподхват, если человек завис
+fiSetTimer(ctx.chat.id, () => { fiSendNudgeIfStill(ctx.chat.id); }, 90000);
 }
 
 /* ============================================================================
@@ -615,7 +767,7 @@ function emergencyContactsText(countryCode) {
 
   if (code === 'US') {
     return [
-     // ========================= bot.js (PART 2/4) =========================
+      // ========================= bot.js (PART 2/4) =========================
 /* ============================================================================
    Safety: self-harm / crisis trigger (soft routing)
 ============================================================================ */
@@ -1009,7 +1161,7 @@ bot.on('text', async (ctx, next) => {
   }
 });
 // ========================= end PART 2/4 =========================
-  // ========================= bot.js (PART 3/4) =========================
+    // ========================= bot.js (PART 3/4) =========================
 /* ============================================================================
    Admin stats / manual ticks
 ============================================================================ */
@@ -1175,11 +1327,202 @@ bot.action('DAY_SUPPORT', async (ctx) => {
   await sendDayReturn(ctx, 'support');
 });
 
+// ================= FIRST IMPRESSION HANDLERS =================
+
+bot.action(['FI_MOOD_TENSE', 'FI_MOOD_TIRED', 'FI_MOOD_CALM', 'FI_MOOD_UNSURE'], async (ctx) => {
+  try {
+    const st = fiEnsure(ctx.chat.id);
+    if (!st || st.step !== 'mood_asked')
+    fiClearTimer(ctx.chat.id);
+    {
+      await safeAnswerCbQuery(ctx);
+      return;
+    }
+
+    const map = {
+      FI_MOOD_TENSE: 'tense',
+      FI_MOOD_TIRED: 'tired',
+      FI_MOOD_CALM: 'calm',
+      FI_MOOD_UNSURE: 'unsure'
+    };
+
+    st.mood = map[String(ctx.callbackQuery && ctx.callbackQuery.data)] || 'unsure';
+    st.step = 'palms_asked';
+
+    await safeAnswerCbQuery(ctx);
+    try { await ctx.editMessageReplyMarkup(null); } catch (_) {}
+
+    await sendWithPace(ctx, fiMirrorMood(st.mood), 900);
+    await sendWithPace(ctx, 'Почувствуй ладони.', 700);
+    await ctx.reply('Они тёплые или прохладные?', fiPalmsKeyboard());
+    fiSetTimer(ctx.chat.id, () => { fiSendNudgeIfStill(ctx.chat.id); }, 90000);
+  } catch (e) {
+    console.error('[first_impression] mood error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    await safeAnswerCbQuery(ctx);
+  }
+});
+
+bot.action(['FI_PALMS_WARM', 'FI_PALMS_COOL', 'FI_PALMS_NEUTRAL', 'FI_PALMS_UNSURE'], async (ctx) => {
+  try {
+    const st = fiEnsure(ctx.chat.id);
+    if (!st || st.step !== 'palms_asked')
+    fiClearTimer(ctx.chat.id);
+    {
+      await safeAnswerCbQuery(ctx);
+      return;
+    }
+
+    const map = {
+      FI_PALMS_WARM: 'warm',
+      FI_PALMS_COOL: 'cool',
+      FI_PALMS_NEUTRAL: 'neutral',
+      FI_PALMS_UNSURE: 'unsure'
+    };
+
+    st.palms = map[String(ctx.callbackQuery && ctx.callbackQuery.data)] || 'unsure';
+    st.step = 'end_asked';
+
+    await safeAnswerCbQuery(ctx);
+    try { await ctx.editMessageReplyMarkup(null); } catch (_) {}
+
+    await sendWithPace(ctx, fiHaiku(), 900);
+    await sendWithPace(ctx, 'На сегодня достаточно.', 700);
+
+    await ctx.reply('Как тебе сейчас?', fiEndKeyboard());
+    fiSetTimer(ctx.chat.id, () => { fiSendNudgeIfStill(ctx.chat.id); }, 90000);
+  } catch (e) {
+    console.error('[first_impression] palms error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    await safeAnswerCbQuery(ctx);
+  }
+});
+
+bot.action('FI_DONE', async (ctx) => {
+  try {
+    await safeAnswerCbQuery(ctx);
+    try { await ctx.editMessageReplyMarkup(null); } catch (_) {}
+
+    fiReset(ctx.chat.id);
+    const u = await store.ensureUser(ctx.chat.id);
+
+    // аккуратно выключаем режимы ввода
+    if (u) {
+      u.awaitingReceiptEmail = false;
+      u.awaitingCountryCode = false;
+      await store.upsertUser(u);
+    }
+
+    await sendWithPace(ctx, 'Хорошо. Можно просто посмотреть меню ниже и выбрать, что сейчас подходит.', 500);
+    await ctx.reply(startText(), mainKeyboard(u));
+  } catch (e) {
+    console.error('[first_impression] done error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    await safeAnswerCbQuery(ctx);
+  }
+});
+
+// ✨ хочу ещё -> сразу запускаем первую неделю (как “настоящий следующий шаг”)
+bot.action('FI_MORE', async (ctx) => {
+  try {
+    await safeAnswerCbQuery(ctx);
+    try { await ctx.editMessageReplyMarkup(null); } catch (_) {}
+
+    fiReset(ctx.chat.id);
+
+    const u = await store.ensureUser(ctx.chat.id);
+
+    u.isActive = true;
+    u.programType = 'free';
+    u.currentDay = 1;
+    u.supportStep = 1;
+    u.lastMorningSentKey = null;
+    u.lastEveningSentKey = null;
+
+    u.awaitingReceiptEmail = false;
+    u.awaitingCountryCode = false;
+
+    await store.upsertUser(u);
+
+    await ctx.reply(SAFETY_INTRO);
+    await ctx.reply(afterStartText(), mainKeyboard(u));
+  } catch (e) {
+    console.error('[first_impression] more error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    await safeAnswerCbQuery(ctx);
+  }
+});
+    bot.action('FI_CONTINUE', async (ctx) => {
+  try {
+    await safeAnswerCbQuery(ctx);
+
+    const st = fiEnsure(ctx.chat.id);
+    if (!st) return;
+
+    // убираем клавиатуру у "подхвата", чтобы не копилось
+    try { await ctx.editMessageReplyMarkup(null); } catch (_) {}
+
+    if (st.step === 'mood_asked') {
+      await ctx.reply('Как ты сейчас?', fiMoodKeyboard());
+      fiSetTimer(ctx.chat.id, () => { fiSendNudgeIfStill(ctx.chat.id); }, 90000);
+      return;
+    }
+
+    if (st.step === 'palms_asked') {
+      await ctx.reply('Они тёплые или прохладные?', fiPalmsKeyboard());
+      fiSetTimer(ctx.chat.id, () => { fiSendNudgeIfStill(ctx.chat.id); }, 90000);
+      return;
+    }
+
+    if (st.step === 'end_asked') {
+      await ctx.reply('Как тебе сейчас?', fiEndKeyboard());
+      fiSetTimer(ctx.chat.id, () => { fiSendNudgeIfStill(ctx.chat.id); }, 90000);
+      return;
+    }
+
+    // если шаг уже не онбординговый — просто меню
+    fiReset(ctx.chat.id);
+    const u = await store.ensureUser(ctx.chat.id);
+    await ctx.reply(startText(), mainKeyboard(u));
+  } catch (e) {
+    console.error('[first_impression] continue error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    await safeAnswerCbQuery(ctx);
+  }
+});
+
+bot.action('FI_MENU', async (ctx) => {
+  try {
+    await safeAnswerCbQuery(ctx);
+    try { await ctx.editMessageReplyMarkup(null); } catch (_) {}
+
+    fiReset(ctx.chat.id);
+    const u = await store.ensureUser(ctx.chat.id);
+
+    // сброс “залипаний” ввода, чтобы меню было чистым
+    if (u) {
+      u.awaitingReceiptEmail = false;
+      u.awaitingCountryCode = false;
+      await store.upsertUser(u);
+    }
+await sendWithPace(ctx, 'Ок. Вернёмся в меню — там можно выбрать следующий шаг.', 500);
+    await ctx.reply(startText(), mainKeyboard(u));
+  } catch (e) {
+    console.error('[first_impression] menu error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    await safeAnswerCbQuery(ctx);
+  }
+});
+
 // ================= BASIC UI =================
 
 bot.start(async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
-  await ctx.reply(startText(), mainKeyboard(u));
+
+  // сброс “залипаний” ввода
+  if (u) {
+    u.awaitingReceiptEmail = false;
+    u.awaitingCountryCode = false;
+    await store.upsertUser(u);
+  }
+
+  // /start теперь = первое впечатление 10/10
+  fiReset(ctx.chat.id);
+  await runFirstImpression(ctx);
 });
 
 bot.action('HOW', async (ctx) => {
@@ -1198,6 +1541,9 @@ bot.action('BACK', async (ctx) => {
     u.awaitingCountryCode = false;
     await store.upsertUser(u);
   }
+
+  // если человек был в онбординге — сбросим и покажем обычный старт
+  fiReset(ctx.chat.id);
 
   await ctx.reply(startText(), mainKeyboard(u));
 });
@@ -1412,8 +1758,7 @@ bot.hears(/^(проверить себя|проверка|чек|скан)$/i, a
 bot.hears(/^(поддержка)$/i, async (ctx) => sendDayReturn(ctx, 'support'));
 
 // ========================= end PART 3/4 =========================
-
-  // ========================= bot.js (PART 4/4) =========================
+// ========================= bot.js (PART 4/4) =========================
 /* ============================================================================
    HTTP server: healthcheck + telegraf webhook + yookassa webhook + success page
 ============================================================================ */
