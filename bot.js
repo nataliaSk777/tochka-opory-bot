@@ -261,7 +261,12 @@ bot.catch((err, ctx) => {
 ============================================================================ */
 
 console.log('BOOT', new Date().toISOString(), 'tzOffsetMin=', new Date().getTimezoneOffset());
-
+async function sendWithPace(ctx, text, ms = 400) {
+  try { await ctx.reply(text); } catch (_) {}
+  if (ms > 0) {
+    await new Promise(r => setTimeout(r, ms));
+  }
+}
 async function safeAnswerCbQuery(ctx) {
   try { await ctx.answerCbQuery(); } catch (_) {}
 }
@@ -1160,6 +1165,28 @@ bot.on('text', async (ctx, next) => {
     return next();
   }
 });
+    function safetyContactsTextByCountryCode(countryCode) {
+  // совместимость: у тебя выше уже есть emergencyContactsText(...)
+  return emergencyContactsText(countryCode);
+}
+
+async function setCountryAndShow(ctx, code) {
+  const u = await store.ensureUser(ctx.chat.id);
+  u.countryCode = String(code || '').toUpperCase();
+  u.awaitingCountryCode = false;
+  await store.upsertUser(u);
+
+  await safeAnswerCbQuery(ctx);
+
+  const t = safetyContactsTextByCountryCode(u.countryCode);
+  await ctx.reply(
+    t,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('🌍 Сменить страну', 'CHOOSE_COUNTRY')],
+      [Markup.button.callback('⬅️ Назад', 'BACK')]
+    ])
+  );
+}
 // ========================= end PART 2/4 =========================
     // ========================= bot.js (PART 3/4) =========================
 /* ============================================================================
