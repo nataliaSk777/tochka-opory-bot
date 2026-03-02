@@ -941,6 +941,14 @@ bot.command('debug_users', async (ctx) => {
     await ctx.reply(lines.slice(i, i + chunkSize).join('\n'));
   }
 });
+bot.command('force_offer', async (ctx) => {
+  const u = await store.ensureUser(ctx.chat.id);
+  u.programType = 'free';
+  u.currentDay = 7;
+  await store.upsertUser(u);
+
+  await ctx.reply('Готово, теперь дождись вечернего сообщения или нажми /evening_test');
+});
 
 bot.command('dbtest', async (ctx) => {
   try {
