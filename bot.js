@@ -891,6 +891,27 @@ bot.command('myid', async (ctx) => {
   if (!ctx.chat) return ctx.reply('Не удалось определить chat.id');
   return ctx.reply(['Твой chat.id:', '', String(ctx.chat.id), '', `Тип чата: ${ctx.chat.type || 'unknown'}`].join('\n'));
 });
+bot.command('force_offer', async (ctx) => {
+  const u = await store.ensureUser(ctx.chat.id);
+
+  u.isActive = true;
+  u.programType = 'free';
+  u.currentDay = 7;
+
+  // чтобы тесты не упирались в “уже отправляли”
+  u.lastEveningSentKey = null;
+  u.lastMorningSentKey = null;
+
+  // выключим режимы ввода на всякий
+  u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
+  u.awaitingReview = false;
+
+  await store.upsertUser(u);
+
+  await ctx.reply('Готово. Показываю экран подписки:', mainKeyboard(u));
+  await ctx.reply(subscriptionText(u), subscriptionKeyboard(u)); // <-- тут будет кнопка BUY_30
+});
 
 bot.command('debug_users', async (ctx) => {
   if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
@@ -962,6 +983,18 @@ bot.command('tick_evening', async (ctx) => {
   }
 });
 
+bot.command('evening_test', async (ctx) => {
+  // чтобы никто посторонний не гонял рассылку
+  if (!isOwnerStrict(ctx)) return ctx.reply('Команда доступна только владельцу бота.');
+
+  await ctx.reply('⏳ Запускаю runEvening(bot)...');
+  try {
+    await runEvening(bot);
+    await ctx.reply('✅ Готово. Проверь, пришло ли “вечернее” и предложение подписки.');
+  } catch (e) {
+    await ctx.reply(`❌ Ошибка: ${e && e.message ? e.message : String(e)}`);
+  }
+});
 bot.command('deliveries', async (ctx) => {
   if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
 
