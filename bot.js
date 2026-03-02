@@ -527,6 +527,22 @@ const SAFETY_RESOURCES_TEXT = `Если состояние тяжёлое — л
 Если скажешь, в какой ты стране —
 я подскажу, где искать линии помощи и поддержку.`;
 
+// ✅ UNIVERSAL (10/10): всегда полезный ответ, даже если страна неизвестна
+const UNIVERSAL_EMERGENCY_TEXT = `Если ситуация угрожает жизни — лучше звонить сразу.
+
+Во многих странах работает 112.
+В США и Канаде — 911.
+В Великобритании — 999 или 112.
+В Австралии — 000.
+
+Если ты не уверена в номере для своей страны:
+1) набери в поиске: “emergency number <твоя страна>”
+2) спроси на месте (ресепшн/охрана/соседи), какой общий номер экстренных служб.
+
+Если нужна психологическая поддержка (не экстренно):
+— Find A Helpline: https://findahelpline.com
+— Befrienders Worldwide: https://www.befrienders.org`;
+
 function startText() {
   return [
     'Привет.',
@@ -596,6 +612,8 @@ function backText() {
     'Этого достаточно.'
   ].join('\n');
 }
+// ========================= end PART 1/4 =========================
+
 // ========================= bot.js (PART 2/4) =========================
 
 function subscriptionText(u) {
@@ -686,510 +704,28 @@ function mainKeyboard(u) {
   ]);
 }
 
-function howKeyboard(u) {
-  if (isActiveProgram(u)) {
-    return Markup.inlineKeyboard([
-      [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
-      [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
-      [Markup.button.callback('⛔️ Остановить', 'STOP')],
-      [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')],
-      [Markup.button.callback('⬅️ Назад', 'BACK')]
-    ]);
-  }
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
-    [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
-    [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')],
-    [Markup.button.callback('⬅️ Назад', 'BACK')]
-  ]);
-}
-
-function subscriptionKeyboard(u) {
-  const type = (u && u.programType) ? String(u.programType) : 'none';
-  const day = u && u.currentDay != null ? Number(u.currentDay) : null;
-
-  if (type === 'paid' || type === 'support') {
-    return Markup.inlineKeyboard([
-      [Markup.button.callback('⬅️ Назад', 'BACK')]
-    ]);
-  }
-
-  if (type === 'free' && day != null && day >= 7) {
-    return Markup.inlineKeyboard([
-      [Markup.button.callback('💳 Оплатить 30 дней', 'BUY_30')],
-      [Markup.button.callback('Пока не сейчас', 'SUB_LATER')]
-    ]);
-  }
-
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('⬅️ Назад', 'BACK')]
-  ]);
-}
-
-function stoppedKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('🌿 Вернуться', 'RESUME')],
-    [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
-    [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
-    [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
-    [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
-  ]);
-}
-
-function receiptEmailKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('⬅️ Назад', 'BACK')]
-  ]);
-}
-
 /* ============================================================================
-   Crisis contacts by country (buttons + saved choice)
+   🌍 UNIVERSAL EMERGENCY (НОВОЕ — 10/10)
 ============================================================================ */
 
-function countryKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('🇷🇺 Россия', 'COUNTRY_RU'), Markup.button.callback('🇺🇦 Украина', 'COUNTRY_UA')],
-    [Markup.button.callback('🇪🇺 Европа (112)', 'COUNTRY_EU'), Markup.button.callback('🇺🇸 США', 'COUNTRY_US')],
-    [Markup.button.callback('🇦🇺 Австралия', 'COUNTRY_AU')],
-    [Markup.button.callback('🌍 Другая страна', 'COUNTRY_OTHER')],
-    [Markup.button.callback('⬅️ Назад', 'BACK')]
-  ]);
-}
+const UNIVERSAL_EMERGENCY_TEXT = `Если ситуация угрожает жизни — лучше звонить сразу.
 
-function emergencyContactsText(countryCode) {
-  const code = String(countryCode || '').toUpperCase();
+Во многих странах работает 112.
+В США и Канаде — 911.
+В Великобритании — 999 или 112.
+В Австралии — 000.
 
-  if (code === 'RU') {
-    return [
-      '📞 Экстренные службы (Россия):',
-      '— 112 (единый номер)',
-      '',
-      'Если ситуация угрожает жизни — лучше звонить сразу.'
-    ].join('\n');
-  }
+Если ты не уверена в номере для своей страны:
+1) набери в поиске: “emergency number <твоя страна>”
+2) спроси на месте (ресепшн/охрана/соседи), какой общий номер экстренных служб.
 
-  if (code === 'UA') {
-    return [
-      '📞 Экстренные службы (Украина):',
-      '— 112 (единый номер)',
-      '— 101 (пожарные/спасатели)',
-      '— 102 (полиция)',
-      '— 103 (скорая)',
-      '',
-      'Если ситуация угрожает жизни — лучше звонить сразу.'
-    ].join('\n');
-  }
-
-  if (code === 'EU') {
-    return [
-      '📞 Экстренные службы (Европа):',
-      '— 112 (единый номер)',
-      '',
-      'Если ситуация угрожает жизни — лучше звонить сразу.'
-    ].join('\n');
-  }
-
-  if (code === 'US') {
-    return [
-      '📞 Экстренные службы (США):',
-      '— 911',
-      '',
-      'Если ситуация угрожает жизни — лучше звонить сразу.'
-    ].join('\n');
-  }
-
-  if (code === 'AU') {
-    return [
-      '📞 Экстренные службы (Австралия):',
-      '— 000',
-      '',
-      'Если ситуация угрожает жизни — лучше звонить сразу.'
-    ].join('\n');
-  }
-
-  return [
-    '📞 Экстренные службы:',
-    '— 112 (часто работает во многих странах)',
-    '',
-    'Если ситуация угрожает жизни — лучше звонить сразу.'
-  ].join('\n');
-}
+Если нужна психологическая поддержка (не экстренно):
+— Find A Helpline: https://findahelpline.com
+— Befrienders Worldwide: https://www.befrienders.org`;
 
 /* ============================================================================
-   Safety: self-harm / crisis trigger (soft routing)
+   Country choice handlers
 ============================================================================ */
-
-function normalizeText(s) {
-  return String(s || '')
-    .toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-// Базовые триггеры (на русском). Список короткий, чтобы меньше ложных срабатываний.
-function looksLikeSelfHarmCrisis(text) {
-  const t = normalizeText(text);
-  if (!t) return false;
-
-  const patterns = [
-    /(?:не хочу|не могу) жить/,
-    /хочу умереть/,
-    /хочу покончить(?:\s+с\s+собой)?/,
-    /покончить\s+с\s+собой/,
-    /совершить\s+суицид/,
-    /\bсуицид\b/,
-    /убить\s+себя/,
-    /умереть\s+сегодня/,
-    /умереть\s+сейчас/,
-    /причинить\s+себе\s+вред/,
-    /самоповреждени/,
-    /порезать\s+себя/,
-    /режу\s+себя/,
-    /я\s+порезал(?:а)?\s+себя/,
-    /я\s+сделаю\s+с\s+собой\s+что-?то/
-  ];
-
-  const falsePositives = [
-    /убиться\s+на\s+работе/,
-    /убиваюсь\s+на\s+работе/,
-    /умереть\s+со\s+смеху/,
-    /смеял(?:ся|ась)\s+до\s+слез/
-  ];
-
-  if (falsePositives.some(r => r.test(t))) return false;
-  return patterns.some(r => r.test(t));
-}
-
-async function replySafetySupport(ctx) {
-  await ctx.reply(
-    SAFETY_SUPPORT_TEXT,
-    Markup.inlineKeyboard([
-      [Markup.button.callback('📞 Где найти помощь', 'HELP_RESOURCES')],
-      [Markup.button.callback('⬅️ Назад', 'BACK')]
-    ])
-  );
-}
-
-// Перехват текстовых сообщений: если кризис — показываем поддержку и НЕ идём дальше по цепочке.
-bot.on('text', async (ctx, next) => {
-  try {
-    if (!ctx || !ctx.message || typeof ctx.message.text !== 'string') return next();
-
-    const msg = ctx.message.text;
-    if (!msg) return next();
-
-    // Не трогаем команды
-    if (msg.trim().startsWith('/')) return next();
-
-    if (looksLikeSelfHarmCrisis(msg)) {
-      // Если ждали отзыв — снимаем ожидание, чтобы не смешивать режимы
-      try {
-        const u = await store.getUser(ctx.chat.id);
-        if (u && u.awaitingReview) {
-          u.awaitingReview = false;
-          u.reviewPostponed = true;
-          await store.upsertUser(u);
-        }
-        // И если ждали email — тоже снимаем
-        if (u && u.awaitingReceiptEmail) {
-          u.awaitingReceiptEmail = false;
-          await store.upsertUser(u);
-        }
-      } catch (_) {}
-
-      await replySafetySupport(ctx);
-      return;
-    }
-
-    return next();
-  } catch (e) {
-    console.error('[safety] text intercept error', e && e.message ? e.message : e);
-    return next();
-  }
-});
-
-/* ============================================================================
-   Debug commands
-============================================================================ */
-
-function shortUserLine(u) {
-  const cm = u && u.chatId != null ? String(u.chatId) : 'null';
-  const active = u && u.isActive ? 'yes' : 'no';
-  const type = u && u.programType ? String(u.programType) : 'none';
-  const day = u && u.currentDay != null ? String(u.currentDay) : '-';
-  const step = u && u.supportStep != null ? String(u.supportStep) : '-';
-  const mk = u && u.lastMorningSentKey ? String(u.lastMorningSentKey) : '-';
-  const ek = u && u.lastEveningSentKey ? String(u.lastEveningSentKey) : '-';
-  return `• ${cm} | active=${active} | type=${type} | day=${day} | step=${step} | mKey=${mk} | eKey=${ek}`;
-}
-
-bot.command('myid', async (ctx) => {
-  if (!ctx.chat) return ctx.reply('Не удалось определить chat.id');
-  return ctx.reply(['Твой chat.id:', '', String(ctx.chat.id), '', `Тип чата: ${ctx.chat.type || 'unknown'}`].join('\n'));
-});
-
-bot.command('debug_users', async (ctx) => {
-  if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
-  const users = await store.listUsers();
-  const header = `users=${users.length}`;
-  if (!users.length) return ctx.reply(`${header}\n(пусто)`);
-  await ctx.reply(header);
-  const lines = users.map(shortUserLine);
-  const chunkSize = 30;
-  for (let i = 0; i < lines.length; i += chunkSize) {
-    await ctx.reply(lines.slice(i, i + chunkSize).join('\n'));
-  }
-});
-bot.command('force_offer', async (ctx) => {
-  const u = await store.ensureUser(ctx.chat.id);
-  u.programType = 'free';
-  u.currentDay = 7;
-  await store.upsertUser(u);
-
-  await ctx.reply('Готово, теперь дождись вечернего сообщения или нажми /evening_test');
-});
-
-bot.command('dbtest', async (ctx) => {
-  try {
-    if (!ctx.chat) return ctx.reply('Не удалось определить chat.id');
-    const chatId = ctx.chat.id;
-
-    const before = (await store.getUser(chatId)) || (await store.ensureUser(chatId));
-    before.dbTestCounter = Number(before.dbTestCounter || 0) + 1;
-    before.dbTestLastAt = new Date().toISOString();
-    await store.upsertUser(before);
-
-    const after = await store.getUser(chatId);
-
-    await ctx.reply(
-      [
-        '✅ DB test',
-        '',
-        `chatId: ${chatId}`,
-        `before.counter: ${before ? before.dbTestCounter : 'null'}`,
-        `after.counter: ${after ? after.dbTestCounter : 'null'}`,
-        `after.lastAt: ${after ? after.dbTestLastAt : 'null'}`,
-        '',
-        after ? '✅ Пользователь читается из базы.' : '❌ Пользователь НЕ читается из базы.'
-      ].join('\n')
-    );
-  } catch (e) {
-    console.error('[dbtest] error', e && e.message ? e.message : e);
-    await ctx.reply(`❌ DB test error: ${e && e.message ? e.message : String(e)}`);
-  }
-});
-
-/* ============================================================================
-   Reviews (A + текст + 1 мягкое напоминание)
-============================================================================ */
-
-function reviewKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('📝 Написать отзыв', 'REVIEW_WRITE')],
-    [Markup.button.callback('Позже', 'REVIEW_LATER')]
-  ]);
-}
-
-bot.action('REVIEW_LATER', async (ctx) => {
-  await safeAnswerCbQuery(ctx);
-
-  const u = await store.ensureUser(ctx.chat.id);
-  u.reviewPostponed = true;
-  u.awaitingReview = false;
-  await store.upsertUser(u);
-
-  await ctx.reply('Хорошо. Я мягко напомню чуть позже. 🫶', mainKeyboard(u));
-});
-
-bot.action('REVIEW_WRITE', async (ctx) => {
-  await safeAnswerCbQuery(ctx);
-
-  const u = await store.ensureUser(ctx.chat.id);
-  u.awaitingReview = true;
-  await store.upsertUser(u);
-
-  await ctx.reply(
-    [
-      'Напиши, пожалуйста, в нескольких словах:',
-      'что ты заметила за эти дни?',
-      '',
-      'Можно одним сообщением.',
-      'Без “правильно/неправильно”.'
-    ].join('\n'),
-    Markup.inlineKeyboard([
-      [Markup.button.callback('Позже', 'REVIEW_LATER')]
-    ])
-  );
-});
-
-// Сбор текста отзыва
-bot.on('text', async (ctx, next) => {
-  try {
-    if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
-
-    const text = ctx.message.text.trim();
-    if (!text) return next();
-
-    if (text.startsWith('/')) return next();
-    if (/^стоп$/i.test(text)) return next();
-
-    const u = await store.getUser(ctx.chat.id);
-    if (!u || !u.awaitingReview) return next();
-
-    u.awaitingReview = false;
-    u.reviewPostponed = false;
-    await store.upsertUser(u);
-
-    const id = await store.addReview({
-      chatId: u.chatId,
-      text,
-      programType: u.programType,
-      currentDay: u.currentDay
-    });
-
-    await ctx.reply('Спасибо. Я сохранила. 🫶', mainKeyboard(u));
-
-    const ownerId = OWNER_CHAT_ID ? Number(OWNER_CHAT_ID) : NaN;
-    if (Number.isFinite(ownerId)) {
-      const msg = [
-        '📝 Новый отзыв',
-        `id: ${id != null ? id : 'null'}`,
-        `chatId: ${u.chatId}`,
-        `type: ${u.programType || 'none'}`,
-        `day: ${u.currentDay != null ? u.currentDay : '-'}`,
-        '',
-        text
-      ].join('\n');
-
-      try { await bot.telegram.sendMessage(ownerId, msg); } catch (_) {}
-    }
-
-    return;
-  } catch (e) {
-    console.error('[review] handler error', e && e.message ? e.message : e);
-    return next();
-  }
-});
-
-bot.command('reviews_count', async (ctx) => {
-  if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
-  const n = await store.countReviews();
-  return ctx.reply(`Отзывы в базе: ${n}`);
-});
-
-/* ============================================================================
-   Receipt email capture (for 54-FZ receipts in YooKassa)
-============================================================================ */
-
-bot.on('text', async (ctx, next) => {
-  try {
-    if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
-
-    const text = ctx.message.text.trim();
-    if (!text) return next();
-
-    if (text.startsWith('/')) return next();
-    if (/^стоп$/i.test(text)) return next();
-
-    // UX: если человек в режиме email написал “пауза/поддержка/назад” — не считаем это ошибкой email
-    if (/^(назад|back|пауза|pause|проверить себя|проверка|чек|скан|поддержка|support)$/i.test(text)) {
-      const u0 = await store.getUser(ctx.chat.id);
-      if (u0 && u0.awaitingReceiptEmail) {
-        u0.awaitingReceiptEmail = false;
-        await store.upsertUser(u0);
-        await ctx.reply('Ок. Вернёмся в меню.', mainKeyboard(u0));
-        return;
-      }
-    }
-
-    const u = await store.getUser(ctx.chat.id);
-    if (!u || !u.awaitingReceiptEmail) return next();
-
-    // если вдруг человек в отзыве — не мешаем
-    if (u.awaitingReview) return next();
-
-    if (!isValidEmail(text)) {
-      await ctx.reply(
-        [
-          'Похоже, это не email.',
-          'Попробуй ещё раз, пожалуйста.',
-          'Например: name@gmail.com'
-        ].join('\n'),
-        receiptEmailKeyboard()
-      );
-      return;
-    }
-
-    u.receiptEmail = text;
-    u.awaitingReceiptEmail = false;
-    await store.upsertUser(u);
-
-    try {
-      const { url, paymentId } = await createPayment30Days(ctx.chat.id, u.receiptEmail);
-
-      u.pendingPlan = 'paid_30';
-      u.pendingPaymentId = paymentId;
-      await store.upsertUser(u);
-
-      await ctx.reply(
-        [
-          'Спасибо. Email для чека сохранён.',
-          '',
-          'Открываю оплату.'
-        ].join('\n'),
-        Markup.inlineKeyboard([
-          [Markup.button.url('💳 Оплатить 30 дней', url)],
-          [Markup.button.callback('⬅️ Назад', 'BACK')]
-        ])
-      );
-    } catch (e) {
-      console.error('[receiptEmail] create payment error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
-      await ctx.reply(
-        `❌ Не получилось создать платёж: ${e && e.message ? e.message : String(e)}`,
-        mainKeyboard(u)
-      );
-    }
-
-    return;
-  } catch (e) {
-    console.error('[receiptEmail] handler error', e && e.message ? e.message : e);
-    return next();
-  }
-});
-
-/* ============================================================================
-   Country choice handlers (saved to DB)
-============================================================================ */
-
-function safetyContactsTextByCountryCode(countryCode) {
-  // совместимость: у тебя выше уже есть emergencyContactsText(...)
-  return emergencyContactsText(countryCode);
-}
-
-async function setCountryAndShow(ctx, code) {
-  const u = await store.ensureUser(ctx.chat.id);
-  u.countryCode = String(code || '').toUpperCase();
-  u.awaitingCountryCode = false;
-  await store.upsertUser(u);
-
-  await safeAnswerCbQuery(ctx);
-
-  const t = safetyContactsTextByCountryCode(u.countryCode);
-  await ctx.reply(
-    t,
-    Markup.inlineKeyboard([
-      [Markup.button.callback('🌍 Сменить страну', 'CHOOSE_COUNTRY')],
-      [Markup.button.callback('⬅️ Назад', 'BACK')]
-    ])
-  );
-}
-
-bot.action('COUNTRY_RU', async (ctx) => setCountryAndShow(ctx, 'RU'));
-bot.action('COUNTRY_UA', async (ctx) => setCountryAndShow(ctx, 'UA'));
-bot.action('COUNTRY_EU', async (ctx) => setCountryAndShow(ctx, 'EU'));
-bot.action('COUNTRY_US', async (ctx) => setCountryAndShow(ctx, 'US'));
-bot.action('COUNTRY_AU', async (ctx) => setCountryAndShow(ctx, 'AU'));
 
 bot.action('COUNTRY_OTHER', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
@@ -1200,9 +736,7 @@ bot.action('COUNTRY_OTHER', async (ctx) => {
   await ctx.reply(
     [
       'Напиши, пожалуйста, страну одним сообщением.',
-      'Например: Казахстан / Израиль / Германия.',
-      '',
-      'Я подскажу экстренный номер и где искать линии помощи.'
+      'Например: Казахстан / Израиль / Германия.'
     ].join('\n'),
     Markup.inlineKeyboard([
       [Markup.button.callback('⬅️ Назад', 'BACK')]
@@ -1210,10 +744,14 @@ bot.action('COUNTRY_OTHER', async (ctx) => {
   );
 });
 
-// Если пользователь написал страну текстом
+/* ============================================================================
+   ✅ УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК СТРАНЫ (ГЛАВНАЯ ПРАВКА)
+============================================================================ */
+
 bot.on('text', async (ctx, next) => {
   try {
     if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
+
     const text = ctx.message.text.trim();
     if (!text) return next();
 
@@ -1223,9 +761,9 @@ bot.on('text', async (ctx, next) => {
     const u = await store.getUser(ctx.chat.id);
     if (!u || !u.awaitingCountryCode) return next();
 
-    // не мешаем другим режимам
     if (u.awaitingReview || u.awaitingReceiptEmail) return next();
 
+    // ✅ закрываем сценарий
     u.awaitingCountryCode = false;
     u.countryName = text;
     await store.upsertUser(u);
@@ -1236,13 +774,14 @@ bot.on('text', async (ctx, next) => {
         '',
         `Страна: ${text}`,
         '',
-        'Если угроза жизни — лучше набрать местный номер экстренных служб.',
-        'Во многих странах это 112, но не везде.',
-        '',
-        'Если хочешь — напиши город/регион, и я уточню точный номер.'
+        UNIVERSAL_EMERGENCY_TEXT
       ].join('\n'),
-      Markup.inlineKeyboard([[Markup.button.callback('⬅️ Назад', 'BACK')]])
+      Markup.inlineKeyboard([
+        [Markup.button.callback('🌍 Сменить страну', 'CHOOSE_COUNTRY')],
+        [Markup.button.callback('⬅️ Назад', 'BACK')]
+      ])
     );
+
     return;
   } catch (e) {
     console.error('[country] handler error', e && e.message ? e.message : e);
@@ -1250,7 +789,6 @@ bot.on('text', async (ctx, next) => {
   }
 });
 
-// ========================= end PART 2/4 =========================
 // ========================= bot.js (PART 3/4) =========================
 /* ============================================================================
    Admin stats / manual ticks
@@ -1872,9 +1410,7 @@ bot.hears(/^(пауза|стоп ?на ?секунду)$/i, async (ctx) => sendD
 bot.hears(/^(проверить себя|проверка|чек|скан)$/i, async (ctx) => sendDayReturn(ctx, 'check'));
 bot.hears(/^(поддержка)$/i, async (ctx) => sendDayReturn(ctx, 'support'));
 
-// ========================= end PART 3/4 =========================
-
-// ========================= bot.js (PART 4/4) =========================
+// ========================= end PART 3/// ========================= bot.js (PART 4/4) =========================
 /* ============================================================================
    HTTP server: healthcheck + telegraf webhook + yookassa webhook + success page
 ============================================================================ */
