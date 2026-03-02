@@ -56,7 +56,13 @@ const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY || process.env.SECRE
 const BASE_URL = process.env.BASE_URL || process.env.PUBLIC_URL || '';
 
 // Цена 30 дней (в RUB). Можно переопределить в env.
-const PRICE_30_RUB = String(process.env.PRICE_30_RUB || '299.00');
+const PRICE_30_RUB_RAW = String(process.env.PRICE_30_RUB || '299.00');
+
+// ✅ Для чеков YooKassa часто требует tax_system_code (1..6). Если не знаешь — обычно 1.
+// Можно переопределить в env: YOOKASSA_TAX_SYSTEM_CODE или TAX_SYSTEM_CODE
+const YOOKASSA_TAX_SYSTEM_CODE = String(
+  process.env.YOOKASSA_TAX_SYSTEM_CODE || process.env.TAX_SYSTEM_CODE || '1'
+);
 
 // Опциональная защита webhook через Basic Auth
 const YOOKASSA_WEBHOOK_USER = process.env.YOOKASSA_WEBHOOK_USER || '';
@@ -150,6 +156,22 @@ function isValidEmail(s) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i.test(t);
 }
 
+// ✅ Нормализация суммы под требования YooKassa: строка с 2 знаками после точки
+function normalizeAmountValue(v) {
+  const raw = String(v == null ? '' : v).trim().replace(',', '.');
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n.toFixed(2);
+}
+
+function normalizeTaxSystemCode(v) {
+  const s = String(v == null ? '' : v).trim();
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  if (n < 1 || n > 6) return null;
+  return n;
+}
+
 async function createPayment30Days(chatId, receiptEmail) {
   if (!havePaymentsEnabled()) {
     throw new Error('Payments not configured: set (SHOP_ID|YOOKASSA_SHOP_ID), (SECRET_KEY|YOOKASSA_SECRET_KEY), (BASE_URL|PUBLIC_URL)');
@@ -159,36 +181,62 @@ async function createPayment30Days(chatId, receiptEmail) {
     throw new Error('Receipt email is required');
   }
 
+  const amountValue = normalizeAmountValue(PRICE_30_RUB_RAW);
+  if (!amountValue) {
+    throw new Error('Invalid PRICE_30_RUB: must be a positive number like 299.00');
+  }
+
+  const taxSystemCode = normalizeTaxSystemCode(YOOKASSA_TAX_SYSTEM_CODE);
+  if (!taxSystemCode) {
+    throw new Error('Invalid TAX_SYSTEM_CODE/YOOKASSA_TAX_SYSTEM_CODE: must be 1..6');
+  }
+
   const idempotencyKey = makeIdempotencyKey();
   const base = BASE_URL.replace(/\/$/, '');
 
-  const payment = await yooKassa.createPayment(
-    {
-      amount: { value: PRICE_30_RUB, currency: 'RUB' },
-      capture: true,
-      confirmation: {
-        type: 'redirect',
-        return_url: `${base}/success`
-      },
-      description: 'Точка опоры — 30 дней',
-      metadata: {
-        plan: 'paid_30',
-        chatId: String(chatId)
-      },
-      receipt: {
-        customer: { email: String(receiptEmail).trim() },
-        items: [
-          {
-            description: 'Подписка «Точка опоры» — 30 дней',
-            quantity: 1,
-            amount: { value: PRICE_30_RUB, currency: 'RUB' },
-            vat_code: 1
-          }
-        ]
-      }
+  const paymentPayload = {
+    amount: { value: amountValue, currency: 'RUB' },
+    capture: true,
+    confirmation: {
+      type: 'redirect',
+      return_url: `${base}/success`
     },
-    idempotencyKey
-  );
+    description: 'Точка опоры — 30 дней',
+    metadata: {
+      plan: 'paid_30',
+      chatId: String(chatId)
+    },
+    // ✅ 54-ФЗ: добавляем чек. Часто обязательны tax_system_code + subject/mode.
+    receipt: {
+      tax_system_code: taxSystemCode,
+      customer: { email: String(receiptEmail).trim() },
+      items: [
+        {
+          description: 'Подписка «Точка опоры» — 30 дней',
+          quantity: '1.00',
+          amount: { value: amountValue, currency: 'RUB' },
+          vat_code: 1,
+          payment_mode: 'full_payment',
+          payment_subject: 'service'
+        }
+      ]
+    }
+  };
+
+  let payment = null;
+  try {
+    payment = await yooKassa.createPayment(paymentPayload, idempotencyKey);
+  } catch (e) {
+    // В лог — полезная диагностика без секретов
+    console.error('[payments] createPayment failed', {
+      message: e && e.message,
+      amountValue,
+      taxSystemCode,
+      baseUrl: base ? 'set' : 'missing',
+      shopId: YOOKASSA_SHOP_ID ? 'set' : 'missing'
+    });
+    throw e;
+  }
 
   const url = payment && payment.confirmation ? payment.confirmation.confirmation_url : null;
   const paymentId = payment && payment.id ? String(payment.id) : null;
@@ -607,7 +655,6 @@ function backText() {
   ].join('\n');
 }
 // ========================= end PART 1/4 =========================
-
 // ========================= bot.js (PART 2/4) =========================
 
 function subscriptionText(u) {
