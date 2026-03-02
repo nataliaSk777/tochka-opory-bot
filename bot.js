@@ -1,4 +1,3 @@
-// ========================= bot.js (PART 1/4) =========================
 'use strict';
 
 require('dotenv').config();
@@ -57,6 +56,9 @@ const BASE_URL = process.env.BASE_URL || process.env.PUBLIC_URL || '';
 
 // Цена 30 дней (в RUB). Можно переопределить в env.
 const PRICE_30_RUB_RAW = String(process.env.PRICE_30_RUB || '299.00');
+
+// ✅ FIX 10/10: в тексте ниже используется PRICE_30_RUB — делаем алиас, не меняя остальную логику
+const PRICE_30_RUB = PRICE_30_RUB_RAW;
 
 // ✅ Для чеков YooKassa часто требует tax_system_code (1..6). Если не знаешь — обычно 1.
 // Можно переопределить в env: YOOKASSA_TAX_SYSTEM_CODE или TAX_SYSTEM_CODE
@@ -654,8 +656,7 @@ function backText() {
     'Этого достаточно.'
   ].join('\n');
 }
-// ========================= end PART 1/4 =========================
-// ========================= bot.js (PART 2/4) =========================
+// ========================= bot.js (PART 2/2) =========================
 
 function subscriptionText(u) {
   const type = (u && u.programType) ? String(u.programType) : 'none';
@@ -917,8 +918,6 @@ bot.on('text', async (ctx, next) => {
   }
 });
 
-// ========================= end PART 2/4 =========================
-// ========================= bot.js (PART 3/4) =========================
 /* ============================================================================
    Admin stats / manual ticks
 ============================================================================ */
@@ -938,6 +937,7 @@ bot.command('myid', async (ctx) => {
   if (!ctx.chat) return ctx.reply('Не удалось определить chat.id');
   return ctx.reply(['Твой chat.id:', '', String(ctx.chat.id), '', `Тип чата: ${ctx.chat.type || 'unknown'}`].join('\n'));
 });
+
 bot.command('force_offer', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
 
@@ -1042,6 +1042,7 @@ bot.command('evening_test', async (ctx) => {
     await ctx.reply(`❌ Ошибка: ${e && e.message ? e.message : String(e)}`);
   }
 });
+
 bot.command('deliveries', async (ctx) => {
   if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
 
@@ -1761,8 +1762,6 @@ bot.hears(/^(пауза|стоп ?на ?секунду)$/i, async (ctx) => sendD
 bot.hears(/^(проверить себя|проверка|чек|скан)$/i, async (ctx) => sendDayReturn(ctx, 'check'));
 bot.hears(/^(поддержка)$/i, async (ctx) => sendDayReturn(ctx, 'support'));
 
-// ========================= end PART 3/4 =========================
-// ========================= bot.js (PART 4/4) =========================
 /* ============================================================================
    HTTP server: healthcheck + telegraf webhook + yookassa webhook + success page
 ============================================================================ */
@@ -2124,4 +2123,4 @@ function shutdown(signal) {
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 
-// ========================= end PART 4/4 =========================
+// ========================= end PART 2/2 =========================
