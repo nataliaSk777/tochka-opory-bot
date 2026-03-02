@@ -291,8 +291,6 @@ function isOwnerStrict(ctx) {
 
 /* ============================================================================
    FIRST IMPRESSION 10/10 (on /start)
-   - без session middleware: держим состояние в памяти процесса (Map)
-   - не ломает остальной код, не требует миграций БД
 ============================================================================ */
 
 const firstImpression = new Map(); // chatId -> { step, mood, palms, startedAt }
@@ -328,8 +326,6 @@ function fiNudgeKeyboard() {
 async function fiSendNudgeIfStill(chatId) {
   const st = fiGet(chatId);
   if (!st) return;
-
-  // если сценарий уже завершён/сброшен — не трогаем
   if (!['mood_asked', 'palms_asked', 'end_asked'].includes(st.step)) return;
 
   let u = null;
@@ -415,7 +411,6 @@ async function runFirstImpression(ctx) {
   const st = fiEnsure(ctx.chat.id);
   if (!st) return;
 
-  // анти-двойной запуск
   if (st.step !== 'idle') return;
 
   st.step = 'mood_asked';
@@ -425,12 +420,11 @@ async function runFirstImpression(ctx) {
   await sendWithPace(ctx, 'Сейчас можно чуть выдохнуть.', 900);
 
   await ctx.reply('Как ты сейчас?', fiMoodKeyboard());
-  // мягкий автоподхват, если человек завис
   fiSetTimer(ctx.chat.id, () => { fiSendNudgeIfStill(ctx.chat.id); }, 90000);
 }
 
 /* ============================================================================
-   Day Return (anti “lost among chats”)
+   Day Return
 ============================================================================ */
 
 function dayReturnSeed(ctx) {
@@ -527,7 +521,7 @@ const SAFETY_RESOURCES_TEXT = `Если состояние тяжёлое — л
 Если скажешь, в какой ты стране —
 я подскажу, где искать линии помощи и поддержку.`;
 
-// ✅ UNIVERSAL (10/10): всегда полезный ответ, даже если страна неизвестна
+// ✅ ВАЖНО: ТОЛЬКО ОДНО объявление (никаких дублей ниже)
 const UNIVERSAL_EMERGENCY_TEXT = `Если ситуация угрожает жизни — лучше звонить сразу.
 
 Во многих странах работает 112.
@@ -704,24 +698,83 @@ function mainKeyboard(u) {
   ]);
 }
 
+function stoppedKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🌿 Вернуться', 'RESUME')],
+    [Markup.button.callback('🏠 Меню', 'BACK')]
+  ]);
+}
+
+function howKeyboard(u) {
+  if (u && u.programType === 'free' && Number(u.currentDay || 1) >= 7) {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback('💳 Оплатить 30 дней', 'BUY_30')],
+      [Markup.button.callback('📌 Подписка', 'SUB_INFO')],
+      [Markup.button.callback('⬅️ Назад', 'BACK')]
+    ]);
+  }
+
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('📌 Подписка', 'SUB_INFO')],
+    [Markup.button.callback('⬅️ Назад', 'BACK')]
+  ]);
+}
+
+function subscriptionKeyboard(u) {
+  const type = (u && u.programType) ? String(u.programType) : 'none';
+  const day = u && u.currentDay != null ? Number(u.currentDay) : null;
+
+  if (type === 'free' && day != null && day >= 7) {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback('💳 Оплатить 30 дней', 'BUY_30')],
+      [Markup.button.callback('Потом', 'SUB_LATER')],
+      [Markup.button.callback('⬅️ Назад', 'BACK')]
+    ]);
+  }
+
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('⬅️ Назад', 'BACK')]
+  ]);
+}
+
+function receiptEmailKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('⬅️ Назад', 'BACK')]
+  ]);
+}
+
 /* ============================================================================
-   🌍 UNIVERSAL EMERGENCY (НОВОЕ — 10/10)
+   Safety: country selection UI
 ============================================================================ */
 
-const UNIVERSAL_EMERGENCY_TEXT = `Если ситуация угрожает жизни — лучше звонить сразу.
+// Минимальный набор стран для “быстрого выбора” (остальное — через “Другая страна”)
+function countryKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('🇷🇺 Россия', 'COUNTRY_RU')],
+    [Markup.button.callback('🇺🇦 Украина', 'COUNTRY_UA')],
+    [Markup.button.callback('🇰🇿 Казахстан', 'COUNTRY_KZ')],
+    [Markup.button.callback('🇧🇾 Беларусь', 'COUNTRY_BY')],
+    [Markup.button.callback('🇮🇱 Израиль', 'COUNTRY_IL')],
+    [Markup.button.callback('🇩🇪 Германия', 'COUNTRY_DE')],
+    [Markup.button.callback('🇺🇸 США', 'COUNTRY_US')],
+    [Markup.button.callback('🌍 Другая страна', 'COUNTRY_OTHER')],
+    [Markup.button.callback('⬅️ Назад', 'BACK')]
+  ]);
+}
 
-Во многих странах работает 112.
-В США и Канаде — 911.
-В Великобритании — 999 или 112.
-В Австралии — 000.
+// Если в твоём проекте уже есть функции под страны — оставляем вызов как есть
+// Здесь предполагается, что они определены дальше/в другом месте проекта
+function safetyContactsTextByCountryCode(cc) {
+  // Если у тебя уже есть реальная реализация — удали этот fallback.
+  // Этот fallback нужен, чтобы бот “не падал”, даже если функция пока не прописана полностью.
+  const code = String(cc || '').toUpperCase();
 
-Если ты не уверена в номере для своей страны:
-1) набери в поиске: “emergency number <твоя страна>”
-2) спроси на месте (ресепшн/охрана/соседи), какой общий номер экстренных служб.
+  // Для неизвестных/неподдержанных — универсальный текст
+  if (!code) return UNIVERSAL_EMERGENCY_TEXT;
 
-Если нужна психологическая поддержка (не экстренно):
-— Find A Helpline: https://findahelpline.com
-— Befrienders Worldwide: https://www.befrienders.org`;
+  // Можно расширять при необходимости
+  return UNIVERSAL_EMERGENCY_TEXT;
+}
 
 /* ============================================================================
    Country choice handlers
@@ -744,8 +797,35 @@ bot.action('COUNTRY_OTHER', async (ctx) => {
   );
 });
 
+// Быстрый выбор стран (код можно использовать как угодно, но текст выдаём универсальный)
+async function onCountryPicked(ctx, code) {
+  const u = await store.ensureUser(ctx.chat.id);
+  u.awaitingCountryCode = false;
+  u.countryCode = String(code || '').toUpperCase();
+  await store.upsertUser(u);
+  await safeAnswerCbQuery(ctx);
+
+  const t = safetyContactsTextByCountryCode(u.countryCode) || UNIVERSAL_EMERGENCY_TEXT;
+
+  await ctx.reply(
+    t,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('🌍 Сменить страну', 'CHOOSE_COUNTRY')],
+      [Markup.button.callback('⬅️ Назад', 'BACK')]
+    ])
+  );
+}
+
+bot.action('COUNTRY_RU', async (ctx) => onCountryPicked(ctx, 'RU'));
+bot.action('COUNTRY_UA', async (ctx) => onCountryPicked(ctx, 'UA'));
+bot.action('COUNTRY_KZ', async (ctx) => onCountryPicked(ctx, 'KZ'));
+bot.action('COUNTRY_BY', async (ctx) => onCountryPicked(ctx, 'BY'));
+bot.action('COUNTRY_IL', async (ctx) => onCountryPicked(ctx, 'IL'));
+bot.action('COUNTRY_DE', async (ctx) => onCountryPicked(ctx, 'DE'));
+bot.action('COUNTRY_US', async (ctx) => onCountryPicked(ctx, 'US'));
+
 /* ============================================================================
-   ✅ УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК СТРАНЫ (ГЛАВНАЯ ПРАВКА)
+   ✅ УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК “ДРУГАЯ СТРАНА” (без дублей, без конфликтов)
 ============================================================================ */
 
 bot.on('text', async (ctx, next) => {
@@ -755,15 +835,16 @@ bot.on('text', async (ctx, next) => {
     const text = ctx.message.text.trim();
     if (!text) return next();
 
+    // команды и стопы — пропускаем дальше
     if (text.startsWith('/')) return next();
     if (/^стоп$/i.test(text)) return next();
 
     const u = await store.getUser(ctx.chat.id);
     if (!u || !u.awaitingCountryCode) return next();
 
+    // другие режимы ввода важнее
     if (u.awaitingReview || u.awaitingReceiptEmail) return next();
 
-    // ✅ закрываем сценарий
     u.awaitingCountryCode = false;
     u.countryName = text;
     await store.upsertUser(u);
@@ -789,10 +870,40 @@ bot.on('text', async (ctx, next) => {
   }
 });
 
+// ========================= end PART 2/4 =========================
 // ========================= bot.js (PART 3/4) =========================
 /* ============================================================================
    Admin stats / manual ticks
 ============================================================================ */
+
+function shortUserLine(u) {
+  const cm = u && u.chatId != null ? String(u.chatId) : 'null';
+  const active = u && u.isActive ? 'yes' : 'no';
+  const type = u && u.programType ? String(u.programType) : 'none';
+  const day = u && u.currentDay != null ? String(u.currentDay) : '-';
+  const step = u && u.supportStep != null ? String(u.supportStep) : '-';
+  const mk = u && u.lastMorningSentKey ? String(u.lastMorningSentKey) : '-';
+  const ek = u && u.lastEveningSentKey ? String(u.lastEveningSentKey) : '-';
+  return `• ${cm} | active=${active} | type=${type} | day=${day} | step=${step} | mKey=${mk} | eKey=${ek}`;
+}
+
+bot.command('myid', async (ctx) => {
+  if (!ctx.chat) return ctx.reply('Не удалось определить chat.id');
+  return ctx.reply(['Твой chat.id:', '', String(ctx.chat.id), '', `Тип чата: ${ctx.chat.type || 'unknown'}`].join('\n'));
+});
+
+bot.command('debug_users', async (ctx) => {
+  if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
+  const users = await store.listUsers();
+  const header = `users=${users.length}`;
+  if (!users.length) return ctx.reply(`${header}\n(пусто)`);
+  await ctx.reply(header);
+  const lines = users.map(shortUserLine);
+  const chunkSize = 30;
+  for (let i = 0; i < lines.length; i += chunkSize) {
+    await ctx.reply(lines.slice(i, i + chunkSize).join('\n'));
+  }
+});
 
 bot.command('stats', async (ctx) => {
   if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
@@ -885,10 +996,183 @@ bot.command('deliveries', async (ctx) => {
 });
 
 /* ============================================================================
-   Handlers
+   Reviews (A + текст + 1 мягкое напоминание)
 ============================================================================ */
 
-// ================= SAFETY HANDLERS =================
+function reviewKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('📝 Написать отзыв', 'REVIEW_WRITE')],
+    [Markup.button.callback('Позже', 'REVIEW_LATER')]
+  ]);
+}
+
+bot.action('REVIEW_LATER', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+
+  const u = await store.ensureUser(ctx.chat.id);
+  u.reviewPostponed = true;
+  u.awaitingReview = false;
+  await store.upsertUser(u);
+
+  await ctx.reply('Хорошо. Я мягко напомню чуть позже. 🫶', mainKeyboard(u));
+});
+
+bot.action('REVIEW_WRITE', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+
+  const u = await store.ensureUser(ctx.chat.id);
+  u.awaitingReview = true;
+  await store.upsertUser(u);
+
+  await ctx.reply(
+    [
+      'Напиши, пожалуйста, в нескольких словах:',
+      'что ты заметила за эти дни?',
+      '',
+      'Можно одним сообщением.',
+      'Без “правильно/неправильно”.'
+    ].join('\n'),
+    Markup.inlineKeyboard([[Markup.button.callback('Позже', 'REVIEW_LATER')]])
+  );
+});
+
+// Сбор текста отзыва
+bot.on('text', async (ctx, next) => {
+  try {
+    if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
+
+    const text = ctx.message.text.trim();
+    if (!text) return next();
+    if (text.startsWith('/')) return next();
+    if (/^стоп$/i.test(text)) return next();
+
+    const u = await store.getUser(ctx.chat.id);
+    if (!u || !u.awaitingReview) return next();
+
+    u.awaitingReview = false;
+    u.reviewPostponed = false;
+    await store.upsertUser(u);
+
+    const id = await store.addReview({
+      chatId: u.chatId,
+      text,
+      programType: u.programType,
+      currentDay: u.currentDay
+    });
+
+    await ctx.reply('Спасибо. Я сохранила. 🫶', mainKeyboard(u));
+
+    const ownerId = OWNER_CHAT_ID ? Number(OWNER_CHAT_ID) : NaN;
+    if (Number.isFinite(ownerId)) {
+      const msg = [
+        '📝 Новый отзыв',
+        `id: ${id != null ? id : 'null'}`,
+        `chatId: ${u.chatId}`,
+        `type: ${u.programType || 'none'}`,
+        `day: ${u.currentDay != null ? u.currentDay : '-'}`,
+        '',
+        text
+      ].join('\n');
+
+      try { await bot.telegram.sendMessage(ownerId, msg); } catch (_) {}
+    }
+
+    return;
+  } catch (e) {
+    console.error('[review] handler error', e && e.message ? e.message : e);
+    return next();
+  }
+});
+
+bot.command('reviews_count', async (ctx) => {
+  if (!isOwnerStrict(ctx)) return ctx.reply('Эта команда доступна только владельцу бота.');
+  const n = await store.countReviews();
+  return ctx.reply(`Отзывы в базе: ${n}`);
+});
+
+/* ============================================================================
+   Receipt email capture (for 54-FZ receipts in YooKassa)
+============================================================================ */
+
+bot.on('text', async (ctx, next) => {
+  try {
+    if (!ctx.chat || !ctx.message || typeof ctx.message.text !== 'string') return next();
+
+    const text = ctx.message.text.trim();
+    if (!text) return next();
+
+    if (text.startsWith('/')) return next();
+    if (/^стоп$/i.test(text)) return next();
+
+    // UX: если человек в режиме email написал “пауза/поддержка/назад” — не считаем это ошибкой email
+    if (/^(назад|back|пауза|pause|проверить себя|проверка|чек|скан|поддержка|support)$/i.test(text)) {
+      const u0 = await store.getUser(ctx.chat.id);
+      if (u0 && u0.awaitingReceiptEmail) {
+        u0.awaitingReceiptEmail = false;
+        await store.upsertUser(u0);
+        await ctx.reply('Ок. Вернёмся в меню.', mainKeyboard(u0));
+        return;
+      }
+    }
+
+    const u = await store.getUser(ctx.chat.id);
+    if (!u || !u.awaitingReceiptEmail) return next();
+
+    // если вдруг человек в отзыве — не мешаем
+    if (u.awaitingReview) return next();
+
+    if (!isValidEmail(text)) {
+      await ctx.reply(
+        [
+          'Похоже, это не email.',
+          'Попробуй ещё раз, пожалуйста.',
+          'Например: name@gmail.com'
+        ].join('\n'),
+        receiptEmailKeyboard()
+      );
+      return;
+    }
+
+    u.receiptEmail = text;
+    u.awaitingReceiptEmail = false;
+    await store.upsertUser(u);
+
+    try {
+      const { url, paymentId } = await createPayment30Days(ctx.chat.id, u.receiptEmail);
+
+      u.pendingPlan = 'paid_30';
+      u.pendingPaymentId = paymentId;
+      await store.upsertUser(u);
+
+      await ctx.reply(
+        [
+          'Спасибо. Email для чека сохранён.',
+          '',
+          'Открываю оплату.'
+        ].join('\n'),
+        Markup.inlineKeyboard([
+          [Markup.button.url('💳 Оплатить 30 дней', url)],
+          [Markup.button.callback('⬅️ Назад', 'BACK')]
+        ])
+      );
+    } catch (e) {
+      console.error('[receiptEmail] create payment error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+      await ctx.reply(
+        `❌ Не получилось создать платёж: ${e && e.message ? e.message : String(e)}`,
+        mainKeyboard(u)
+      );
+    }
+
+    return;
+  } catch (e) {
+    console.error('[receiptEmail] handler error', e && e.message ? e.message : e);
+    return next();
+  }
+});
+
+/* ============================================================================
+   Safety handlers
+============================================================================ */
 
 bot.action('NEED_HELP', async (ctx) => {
   await store.ensureUser(ctx.chat.id);
@@ -907,10 +1191,10 @@ bot.action('HELP_RESOURCES', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
 
-  // Если страна уже сохранена — сразу показываем нужный блок
+  // если сохранён countryCode — покажем универсальный блок (или твой, если расширишь safetyContactsTextByCountryCode)
   const cc = (u && u.countryCode) ? String(u.countryCode) : '';
   if (cc) {
-    const t = safetyContactsTextByCountryCode(cc);
+    const t = safetyContactsTextByCountryCode(cc) || UNIVERSAL_EMERGENCY_TEXT;
     await ctx.reply(
       t,
       Markup.inlineKeyboard([
@@ -921,7 +1205,6 @@ bot.action('HELP_RESOURCES', async (ctx) => {
     return;
   }
 
-  // Иначе предлагаем выбрать страну
   await ctx.reply(
     [
       'Чтобы подсказать экстренные контакты — выбери страну:',
@@ -938,7 +1221,9 @@ bot.action('CHOOSE_COUNTRY', async (ctx) => {
   await ctx.reply('Выбери страну:', countryKeyboard());
 });
 
-// ================= DAY RETURN HANDLERS =================
+/* ============================================================================
+   Day Return handlers
+============================================================================ */
 
 bot.action('DAY_PAUSE', async (ctx) => {
   await safeAnswerCbQuery(ctx);
@@ -955,7 +1240,9 @@ bot.action('DAY_SUPPORT', async (ctx) => {
   await sendDayReturn(ctx, 'support');
 });
 
-// ================= FIRST IMPRESSION HANDLERS =================
+/* ============================================================================
+   FIRST IMPRESSION handlers
+============================================================================ */
 
 bot.action(['FI_MOOD_TENSE', 'FI_MOOD_TIRED', 'FI_MOOD_CALM', 'FI_MOOD_UNSURE'], async (ctx) => {
   try {
@@ -986,7 +1273,7 @@ bot.action(['FI_MOOD_TENSE', 'FI_MOOD_TIRED', 'FI_MOOD_CALM', 'FI_MOOD_UNSURE'],
     await ctx.reply('Они тёплые или прохладные?', fiPalmsKeyboard());
     fiSetTimer(ctx.chat.id, () => { fiSendNudgeIfStill(ctx.chat.id); }, 90000);
   } catch (e) {
-    console.error('[first_impression] mood error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    console.error('[first_impression] mood error', e && e.message ? e.message : e);
     await safeAnswerCbQuery(ctx);
   }
 });
@@ -1021,7 +1308,7 @@ bot.action(['FI_PALMS_WARM', 'FI_PALMS_COOL', 'FI_PALMS_NEUTRAL', 'FI_PALMS_UNSU
     await ctx.reply('Как тебе сейчас?', fiEndKeyboard());
     fiSetTimer(ctx.chat.id, () => { fiSendNudgeIfStill(ctx.chat.id); }, 90000);
   } catch (e) {
-    console.error('[first_impression] palms error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    console.error('[first_impression] palms error', e && e.message ? e.message : e);
     await safeAnswerCbQuery(ctx);
   }
 });
@@ -1034,7 +1321,6 @@ bot.action('FI_DONE', async (ctx) => {
     fiReset(ctx.chat.id);
     const u = await store.ensureUser(ctx.chat.id);
 
-    // аккуратно выключаем режимы ввода
     if (u) {
       u.awaitingReceiptEmail = false;
       u.awaitingCountryCode = false;
@@ -1045,12 +1331,11 @@ bot.action('FI_DONE', async (ctx) => {
     await sendWithPace(ctx, 'Хорошо. Можно просто посмотреть меню ниже и выбрать, что сейчас подходит.', 500);
     await ctx.reply(startText(), mainKeyboard(u));
   } catch (e) {
-    console.error('[first_impression] done error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    console.error('[first_impression] done error', e && e.message ? e.message : e);
     await safeAnswerCbQuery(ctx);
   }
 });
 
-// ✨ хочу ещё -> сразу запускаем первую неделю
 bot.action('FI_MORE', async (ctx) => {
   try {
     await safeAnswerCbQuery(ctx);
@@ -1076,7 +1361,7 @@ bot.action('FI_MORE', async (ctx) => {
     await ctx.reply(SAFETY_INTRO);
     await ctx.reply(afterStartText(), mainKeyboard(u));
   } catch (e) {
-    console.error('[first_impression] more error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    console.error('[first_impression] more error', e && e.message ? e.message : e);
     await safeAnswerCbQuery(ctx);
   }
 });
@@ -1088,7 +1373,6 @@ bot.action('FI_CONTINUE', async (ctx) => {
     const st = fiEnsure(ctx.chat.id);
     if (!st) return;
 
-    // убираем клавиатуру у "подхвата", чтобы не копилось
     try { await ctx.editMessageReplyMarkup(null); } catch (_) {}
 
     if (st.step === 'mood_asked') {
@@ -1109,12 +1393,11 @@ bot.action('FI_CONTINUE', async (ctx) => {
       return;
     }
 
-    // если шаг уже не онбординговый — просто меню
     fiReset(ctx.chat.id);
     const u = await store.ensureUser(ctx.chat.id);
     await ctx.reply(startText(), mainKeyboard(u));
   } catch (e) {
-    console.error('[first_impression] continue error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    console.error('[first_impression] continue error', e && e.message ? e.message : e);
     await safeAnswerCbQuery(ctx);
   }
 });
@@ -1127,7 +1410,6 @@ bot.action('FI_MENU', async (ctx) => {
     fiReset(ctx.chat.id);
     const u = await store.ensureUser(ctx.chat.id);
 
-    // сброс “залипаний” ввода, чтобы меню было чистым
     if (u) {
       u.awaitingReceiptEmail = false;
       u.awaitingCountryCode = false;
@@ -1138,17 +1420,18 @@ bot.action('FI_MENU', async (ctx) => {
     await sendWithPace(ctx, 'Ок. Вернёмся в меню — там можно выбрать следующий шаг.', 500);
     await ctx.reply(startText(), mainKeyboard(u));
   } catch (e) {
-    console.error('[first_impression] menu error', e && e.stack ? e.stack : (e && e.message ? e.message : e));
+    console.error('[first_impression] menu error', e && e.message ? e.message : e);
     await safeAnswerCbQuery(ctx);
   }
 });
 
-// ================= BASIC UI =================
+/* ============================================================================
+   BASIC UI
+============================================================================ */
 
 bot.start(async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
 
-  // сброс “залипаний” ввода
   if (u) {
     u.awaitingReceiptEmail = false;
     u.awaitingCountryCode = false;
@@ -1156,7 +1439,6 @@ bot.start(async (ctx) => {
     await store.upsertUser(u);
   }
 
-  // /start теперь = первое впечатление 10/10
   fiReset(ctx.chat.id);
   await runFirstImpression(ctx);
 });
@@ -1173,7 +1455,6 @@ bot.action('BACK', async (ctx) => {
 
   const wasReceipt = !!(u && u.awaitingReceiptEmail);
 
-  // чтобы не “залипать” в режимах ввода
   if (u) {
     u.awaitingReceiptEmail = false;
     u.awaitingCountryCode = false;
@@ -1181,7 +1462,6 @@ bot.action('BACK', async (ctx) => {
     await store.upsertUser(u);
   }
 
-  // если человек был в онбординге — сбросим и покажем обычный старт
   fiReset(ctx.chat.id);
 
   if (wasReceipt) {
@@ -1214,7 +1494,6 @@ bot.action('START_FREE', async (ctx) => {
   u.lastMorningSentKey = null;
   u.lastEveningSentKey = null;
 
-  // сброс режимов ввода
   u.awaitingReceiptEmail = false;
   u.awaitingCountryCode = false;
   u.awaitingReview = false;
@@ -1223,13 +1502,10 @@ bot.action('START_FREE', async (ctx) => {
 
   await safeAnswerCbQuery(ctx);
 
-  // один раз — мягкая рамка безопасности
   await ctx.reply(SAFETY_INTRO);
-
   await ctx.reply(afterStartText(), mainKeyboard(u));
 });
 
-// 🔄 RESTART: доступен только в free
 bot.action('RESTART', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
 
@@ -1262,7 +1538,6 @@ bot.action('RESTART', async (ctx) => {
   );
 });
 
-// 🌿 RESUME: вернуться после остановки — без сброса прогресса
 bot.action('RESUME', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
 
@@ -1283,7 +1558,6 @@ bot.action('RESUME', async (ctx) => {
   await ctx.reply(backText(), mainKeyboard(u));
 });
 
-// ✅ BUY_30: создаём платёж и отдаём ссылку
 bot.action('BUY_30', async (ctx) => {
   const u = await store.ensureUser(ctx.chat.id);
   await safeAnswerCbQuery(ctx);
@@ -1305,9 +1579,7 @@ bot.action('BUY_30', async (ctx) => {
     return;
   }
 
-  // Если email ещё не сохранён — попросим (54-ФЗ чек от ЮKassa)
   if (!u.receiptEmail) {
-    // на всякий случай: если человек был в другом вводе — выключим
     u.awaitingReview = false;
     u.awaitingCountryCode = false;
 
@@ -1405,12 +1677,12 @@ bot.command('check', async (ctx) => sendDayReturn(ctx, 'check'));
 bot.command('support', async (ctx) => sendDayReturn(ctx, 'support'));
 bot.command('back', async (ctx) => sendDayReturn(ctx, 'back'));
 
-// Русские варианты (удобны для пользователя)
 bot.hears(/^(пауза|стоп ?на ?секунду)$/i, async (ctx) => sendDayReturn(ctx, 'pause'));
 bot.hears(/^(проверить себя|проверка|чек|скан)$/i, async (ctx) => sendDayReturn(ctx, 'check'));
 bot.hears(/^(поддержка)$/i, async (ctx) => sendDayReturn(ctx, 'support'));
 
-// ========================= end PART 3/// ========================= bot.js (PART 4/4) =========================
+// ========================= end PART 3/4 =========================
+// ========================= bot.js (PART 4/4) =========================
 /* ============================================================================
    HTTP server: healthcheck + telegraf webhook + yookassa webhook + success page
 ============================================================================ */
