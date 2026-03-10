@@ -345,6 +345,7 @@ function isOwnerStrict(ctx) {
 
 const firstImpression = new Map(); // chatId -> { step, mood, palms, startedAt }
 const fiTimers = new Map(); // chatId -> timeoutId
+const reviewDrafts = new Map(); // chatId -> { reviewId, text, programType, currentDay, createdAt }
 
 function fiClearTimer(chatId) {
   const id = Number(chatId);
@@ -656,6 +657,7 @@ function backText() {
     'Этого достаточно.'
   ].join('\n');
 }
+
 // ========================= bot.js (PART 2/2) =========================
 
 function subscriptionText(u) {
@@ -721,6 +723,7 @@ function mainKeyboard(u) {
       [Markup.button.callback('🌿 Попробовать первую неделю', 'START_FREE')],
       [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
       [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
+      [Markup.button.callback('📝 Отзыв', 'REVIEW_WRITE')],
       [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
       [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
     ]);
@@ -731,6 +734,7 @@ function mainKeyboard(u) {
       [Markup.button.callback('⛔️ Остановить', 'STOP')],
       [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
       [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
+      [Markup.button.callback('📝 Отзыв', 'REVIEW_WRITE')],
       [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
       [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')],
       [Markup.button.callback('🔄 Начать заново', 'RESTART')]
@@ -741,6 +745,7 @@ function mainKeyboard(u) {
     [Markup.button.callback('⛔️ Остановить', 'STOP')],
     [Markup.button.callback('🫧 Пауза', 'DAY_PAUSE'), Markup.button.callback('🧭 Проверить себя', 'DAY_CHECK')],
     [Markup.button.callback('🧺 Поддержка', 'DAY_SUPPORT')],
+    [Markup.button.callback('📝 Отзыв', 'REVIEW_WRITE')],
     [Markup.button.callback('ℹ️ Как это работает', 'HOW')],
     [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
   ]);
@@ -749,6 +754,7 @@ function mainKeyboard(u) {
 function stoppedKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🌿 Вернуться', 'RESUME')],
+    [Markup.button.callback('📝 Отзыв', 'REVIEW_WRITE')],
     [Markup.button.callback('🏠 Меню', 'BACK')]
   ]);
 }
@@ -1077,15 +1083,49 @@ bot.command('deliveries', async (ctx) => {
 });
 
 /* ============================================================================
-   Reviews (A + текст + 1 мягкое напоминание)
+   Reviews (A + текст + анонимное разрешение)
 ============================================================================ */
 
 function reviewKeyboard() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('📝 Написать отзыв', 'REVIEW_WRITE')],
-    [Markup.button.callback('Позже', 'REVIEW_LATER')]
+    [Markup.button.callback('💛 Оставить отзыв', 'REVIEW_WRITE')],
+    [Markup.button.callback('Не сейчас', 'REVIEW_LATER')]
   ]);
 }
+
+function reviewPermissionKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('Да, можно анонимно', 'REVIEW_PUBLIC_YES')],
+    [Markup.button.callback('Нет, только для бота', 'REVIEW_PUBLIC_NO')]
+  ]);
+}
+
+bot.command('review', async (ctx) => {
+  const u = await store.ensureUser(ctx.chat.id);
+
+  u.awaitingReview = true;
+  u.reviewPostponed = false;
+  u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
+  await store.upsertUser(u);
+
+  reviewDrafts.delete(ctx.chat.id);
+
+  await ctx.reply(
+    [
+      'Мне важно услышать тебя.',
+      '',
+      'Напиши, пожалуйста, своими словами:',
+      'что тебе здесь помогает,',
+      'что отзывается,',
+      'что меняется внутри.',
+      '',
+      'Можно коротко.',
+      'Можно подробнее.'
+    ].join('\n'),
+    Markup.inlineKeyboard([[Markup.button.callback('Не сейчас', 'REVIEW_LATER')]])
+  );
+});
 
 bot.action('REVIEW_LATER', async (ctx) => {
   await safeAnswerCbQuery(ctx);
@@ -1095,7 +1135,9 @@ bot.action('REVIEW_LATER', async (ctx) => {
   u.awaitingReview = false;
   await store.upsertUser(u);
 
-  await ctx.reply('Хорошо. Я мягко напомню чуть позже. 🫶', mainKeyboard(u));
+  reviewDrafts.delete(ctx.chat.id);
+
+  await ctx.reply('Хорошо. Не тороплю. 🫶', mainKeyboard(u));
 });
 
 bot.action('REVIEW_WRITE', async (ctx) => {
@@ -1103,17 +1145,111 @@ bot.action('REVIEW_WRITE', async (ctx) => {
 
   const u = await store.ensureUser(ctx.chat.id);
   u.awaitingReview = true;
+  u.reviewPostponed = false;
+  u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
   await store.upsertUser(u);
+
+  reviewDrafts.delete(ctx.chat.id);
 
   await ctx.reply(
     [
-      'Напиши, пожалуйста, в нескольких словах:',
-      'что ты заметила за эти дни?',
+      'Мне важно услышать тебя.',
       '',
-      'Можно одним сообщением.',
-      'Без “правильно/неправильно”.'
+      'Напиши, пожалуйста, своими словами:',
+      'что тебе здесь помогает,',
+      'что отзывается,',
+      'что меняется внутри.',
+      '',
+      'Можно коротко.',
+      'Можно подробнее.'
     ].join('\n'),
-    Markup.inlineKeyboard([[Markup.button.callback('Позже', 'REVIEW_LATER')]])
+    Markup.inlineKeyboard([[Markup.button.callback('Не сейчас', 'REVIEW_LATER')]])
+  );
+});
+
+bot.action('REVIEW_PUBLIC_YES', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+
+  const draft = reviewDrafts.get(ctx.chat.id);
+  const u = await store.ensureUser(ctx.chat.id);
+
+  if (draft && typeof store.setReviewPublicPermission === 'function') {
+    try {
+      await store.setReviewPublicPermission(draft.reviewId, true);
+    } catch (e) {
+      console.error('[review] setReviewPublicPermission YES error', e && e.message ? e.message : e);
+    }
+  }
+
+  const ownerId = OWNER_CHAT_ID ? Number(OWNER_CHAT_ID) : NaN;
+  if (draft && Number.isFinite(ownerId)) {
+    const msg = [
+      '📝 Новый отзыв',
+      `id: ${draft.reviewId != null ? draft.reviewId : 'null'}`,
+      `chatId: ${u && u.chatId != null ? u.chatId : ctx.chat.id}`,
+      `type: ${draft.programType || 'none'}`,
+      `day: ${draft.currentDay != null ? draft.currentDay : '-'}`,
+      'public: yes',
+      '',
+      draft.text
+    ].join('\n');
+
+    try { await bot.telegram.sendMessage(ownerId, msg); } catch (_) {}
+  }
+
+  reviewDrafts.delete(ctx.chat.id);
+
+  await ctx.reply(
+    [
+      'Спасибо.',
+      '',
+      'Если я однажды использую эти слова,',
+      'то только анонимно и бережно. 💛'
+    ].join('\n'),
+    mainKeyboard(u)
+  );
+});
+
+bot.action('REVIEW_PUBLIC_NO', async (ctx) => {
+  await safeAnswerCbQuery(ctx);
+
+  const draft = reviewDrafts.get(ctx.chat.id);
+  const u = await store.ensureUser(ctx.chat.id);
+
+  if (draft && typeof store.setReviewPublicPermission === 'function') {
+    try {
+      await store.setReviewPublicPermission(draft.reviewId, false);
+    } catch (e) {
+      console.error('[review] setReviewPublicPermission NO error', e && e.message ? e.message : e);
+    }
+  }
+
+  const ownerId = OWNER_CHAT_ID ? Number(OWNER_CHAT_ID) : NaN;
+  if (draft && Number.isFinite(ownerId)) {
+    const msg = [
+      '📝 Новый отзыв',
+      `id: ${draft.reviewId != null ? draft.reviewId : 'null'}`,
+      `chatId: ${u && u.chatId != null ? u.chatId : ctx.chat.id}`,
+      `type: ${draft.programType || 'none'}`,
+      `day: ${draft.currentDay != null ? draft.currentDay : '-'}`,
+      'public: no',
+      '',
+      draft.text
+    ].join('\n');
+
+    try { await bot.telegram.sendMessage(ownerId, msg); } catch (_) {}
+  }
+
+  reviewDrafts.delete(ctx.chat.id);
+
+  await ctx.reply(
+    [
+      'Спасибо.',
+      '',
+      'Твои слова останутся только внутри системы. 💛'
+    ].join('\n'),
+    mainKeyboard(u)
   );
 });
 
@@ -1130,33 +1266,54 @@ bot.on('text', async (ctx, next) => {
     const u = await store.getUser(ctx.chat.id);
     if (!u || !u.awaitingReview) return next();
 
+    if (text.length < 8) {
+      await ctx.reply(
+        [
+          'Хочется сохранить чуть больше смысла.',
+          '',
+          'Напиши, пожалуйста, немного подробнее —',
+          'хотя бы в двух-трёх фразах.'
+        ].join('\n'),
+        Markup.inlineKeyboard([[Markup.button.callback('Не сейчас', 'REVIEW_LATER')]])
+      );
+      return;
+    }
+
     u.awaitingReview = false;
     u.reviewPostponed = false;
     await store.upsertUser(u);
 
-    const id = await store.addReview({
+    const reviewId = await store.addReview({
       chatId: u.chatId,
       text,
       programType: u.programType,
       currentDay: u.currentDay
     });
 
-    await ctx.reply('Спасибо. Я сохранила. 🫶', mainKeyboard(u));
+    reviewDrafts.set(ctx.chat.id, {
+      reviewId,
+      text,
+      programType: u.programType,
+      currentDay: u.currentDay,
+      createdAt: Date.now()
+    });
 
-    const ownerId = OWNER_CHAT_ID ? Number(OWNER_CHAT_ID) : NaN;
-    if (Number.isFinite(ownerId)) {
-      const msg = [
-        '📝 Новый отзыв',
-        `id: ${id != null ? id : 'null'}`,
-        `chatId: ${u.chatId}`,
-        `type: ${u.programType || 'none'}`,
-        `day: ${u.currentDay != null ? u.currentDay : '-'}`,
+    await ctx.reply(
+      [
+        'Спасибо тебе.',
         '',
-        text
-      ].join('\n');
-
-      try { await bot.telegram.sendMessage(ownerId, msg); } catch (_) {}
-    }
+        'Я правда ценю,',
+        'что ты нашла время',
+        'и оставила эти слова.',
+        '',
+        'Можно ли использовать их анонимно —',
+        'например, в канале или в описании бота?',
+        '',
+        'Без имени.',
+        'Очень бережно.'
+      ].join('\n'),
+      reviewPermissionKeyboard()
+    );
 
     return;
   } catch (e) {
@@ -1170,7 +1327,6 @@ bot.command('reviews_count', async (ctx) => {
   const n = await store.countReviews();
   return ctx.reply(`Отзывы в базе: ${n}`);
 });
-
 /* ============================================================================
    Receipt email capture (for 54-FZ receipts in YooKassa)
 ============================================================================ */
@@ -1521,6 +1677,7 @@ bot.start(async (ctx) => {
   }
 
   fiReset(ctx.chat.id);
+  reviewDrafts.delete(ctx.chat.id);
   await runFirstImpression(ctx);
 });
 
@@ -1544,6 +1701,7 @@ bot.action('BACK', async (ctx) => {
   }
 
   fiReset(ctx.chat.id);
+  reviewDrafts.delete(ctx.chat.id);
 
   if (wasReceipt) {
     await ctx.reply('Хорошо. Не вводим email сейчас. Можно вернуться к этому позже.', mainKeyboard(u));
@@ -1581,6 +1739,8 @@ bot.action('START_FREE', async (ctx) => {
 
   await store.upsertUser(u);
 
+  reviewDrafts.delete(ctx.chat.id);
+
   await safeAnswerCbQuery(ctx);
 
   await ctx.reply(SAFETY_INTRO);
@@ -1612,6 +1772,8 @@ bot.action('RESTART', async (ctx) => {
 
   await store.upsertUser(u);
 
+  reviewDrafts.delete(ctx.chat.id);
+
   await safeAnswerCbQuery(ctx);
   await ctx.reply(
     ['Ок. Начинаем сначала — с первой недели 🌿', '', 'Завтра в 7:30 придёт утреннее сообщение.'].join('\n'),
@@ -1634,6 +1796,8 @@ bot.action('RESUME', async (ctx) => {
   u.awaitingReview = false;
 
   await store.upsertUser(u);
+
+  reviewDrafts.delete(ctx.chat.id);
 
   await safeAnswerCbQuery(ctx);
   await ctx.reply(backText(), mainKeyboard(u));
@@ -1666,6 +1830,8 @@ bot.action('BUY_30', async (ctx) => {
 
     u.awaitingReceiptEmail = true;
     await store.upsertUser(u);
+
+    reviewDrafts.delete(ctx.chat.id);
 
     await ctx.reply(
       [
@@ -1724,6 +1890,8 @@ bot.action('START_SUPPORT', async (ctx) => {
 
   await store.upsertUser(u);
 
+  reviewDrafts.delete(ctx.chat.id);
+
   await safeAnswerCbQuery(ctx);
   await ctx.reply(
     ['Поддержка включена.', '', '3 раза в неделю — короткое возвращение к телу.', 'В 7:30 и 20:30 по Москве.'].join('\n'),
@@ -1738,6 +1906,7 @@ async function stopProgram(ctx) {
   u.awaitingCountryCode = false;
   u.awaitingReview = false;
   await store.upsertUser(u);
+  reviewDrafts.delete(ctx.chat.id);
   await ctx.reply(stoppedText(), stoppedKeyboard());
 }
 
