@@ -608,6 +608,7 @@ function startText() {
     'Если тебе сейчас тяжело — нажми «Мне сейчас тяжело».'
   ].join('\n');
 }
+await ctx.reply(startText(), persistentKeyboard(u));
 
 function howText(u) {
   const lineStop = isActiveProgram(u)
@@ -641,6 +642,7 @@ function afterStartText() {
     'Этого достаточно.'
   ].join('\n');
 }
+await ctx.reply(afterStartText(), persistentKeyboard(u));
 
 function stoppedText() {
   return [
@@ -658,6 +660,7 @@ function backText() {
     'Этого достаточно.'
   ].join('\n');
 }
+await ctx.reply(text, persistentKeyboard(u));
 
 // ========================= bot.js (PART 2/2) =========================
 
@@ -751,7 +754,34 @@ function mainKeyboard(u) {
     [Markup.button.callback('🫶 Мне сейчас тяжело', 'NEED_HELP')]
   ]);
 }
+function persistentKeyboard(u) {
 
+  if (!u || u.programType === 'none') {
+    return Markup.keyboard([
+      ['🌿 Попробовать первую неделю'],
+      ['🫧 Пауза', '🧭 Проверить себя'],
+      ['🧺 Поддержка', '📝 Отзыв'],
+      ['ℹ️ Как это работает', '🫶 Мне сейчас тяжело']
+    ]).resize();
+  }
+
+  if (u.programType === 'free') {
+    return Markup.keyboard([
+      ['⛔️ Остановить'],
+      ['🫧 Пауза', '🧭 Проверить себя'],
+      ['🧺 Поддержка', '📝 Отзыв'],
+      ['ℹ️ Как это работает', '🫶 Мне сейчас тяжело'],
+      ['🔄 Начать заново']
+    ]).resize();
+  }
+
+  return Markup.keyboard([
+    ['⛔️ Остановить'],
+    ['🫧 Пауза', '🧭 Проверить себя'],
+    ['🧺 Поддержка', '📝 Отзыв'],
+    ['ℹ️ Как это работает', '🫶 Мне сейчас тяжело']
+  ]).resize();
+}
 function stoppedKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🌿 Вернуться', 'RESUME')],
@@ -1931,7 +1961,132 @@ bot.command('back', async (ctx) => sendDayReturn(ctx, 'back'));
 bot.hears(/^(пауза|стоп ?на ?секунду)$/i, async (ctx) => sendDayReturn(ctx, 'pause'));
 bot.hears(/^(проверить себя|проверка|чек|скан)$/i, async (ctx) => sendDayReturn(ctx, 'check'));
 bot.hears(/^(поддержка)$/i, async (ctx) => sendDayReturn(ctx, 'support'));
+bot.hears('🫧 Пауза', async (ctx) => {
+  await sendDayReturn(ctx, 'pause');
+});
 
+bot.hears('🧭 Проверить себя', async (ctx) => {
+  await sendDayReturn(ctx, 'check');
+});
+
+bot.hears('🧺 Поддержка', async (ctx) => {
+  await sendDayReturn(ctx, 'support');
+});
+
+bot.hears('📝 Отзыв', async (ctx) => {
+
+  const u = await store.ensureUser(ctx.chat.id);
+
+  u.awaitingReview = true;
+  u.reviewPostponed = false;
+  u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
+
+  await store.upsertUser(u);
+
+  reviewDrafts.delete(ctx.chat.id);
+
+  await ctx.reply(
+    [
+      'Мне важно услышать тебя.',
+      '',
+      'Напиши, пожалуйста, своими словами:',
+      'что тебе здесь помогает,',
+      'что отзывается,',
+      'что меняется внутри.',
+      '',
+      'Можно коротко.',
+      'Можно подробнее.'
+    ].join('\n')
+  );
+});
+bot.hears('ℹ️ Как это работает', async (ctx) => {
+
+  const u = await store.ensureUser(ctx.chat.id);
+
+  await ctx.reply(
+    howText(u),
+    howKeyboard(u)
+  );
+});
+
+bot.hears('🫶 Мне сейчас тяжело', async (ctx) => {
+
+  await store.ensureUser(ctx.chat.id);
+
+  await ctx.reply(
+    SAFETY_SUPPORT_TEXT,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('📞 Экстренные контакты', 'HELP_RESOURCES')],
+      [Markup.button.callback('⬅️ Назад', 'BACK')]
+    ])
+  );
+});
+
+bot.hears('🌿 Попробовать первую неделю', async (ctx) => {
+
+  const u = await store.ensureUser(ctx.chat.id);
+
+  u.isActive = true;
+  u.programType = 'free';
+  u.currentDay = 1;
+  u.supportStep = 1;
+  u.lastMorningSentKey = null;
+  u.lastEveningSentKey = null;
+
+  u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
+  u.awaitingReview = false;
+
+  await store.upsertUser(u);
+
+  reviewDrafts.delete(ctx.chat.id);
+
+  await ctx.reply(SAFETY_INTRO);
+  await ctx.reply(afterStartText(), persistentKeyboard(u));
+});
+bot.hears('⛔️ Остановить', async (ctx) => {
+  await stopProgram(ctx);
+});
+bot.hears('🔄 Начать заново', async (ctx) => {
+
+  const u = await store.ensureUser(ctx.chat.id);
+
+  if (!u || u.programType !== 'free') {
+    await ctx.reply(
+      'Перезапуск доступен только в первой неделе.',
+      persistentKeyboard(u)
+    );
+    return;
+  }
+
+  u.isActive = true;
+  u.programType = 'free';
+  u.currentDay = 1;
+  u.supportStep = 1;
+  u.lastMorningSentKey = null;
+  u.lastEveningSentKey = null;
+
+  u.pendingPaymentId = null;
+  u.pendingPlan = null;
+
+  u.awaitingReceiptEmail = false;
+  u.awaitingCountryCode = false;
+  u.awaitingReview = false;
+
+  await store.upsertUser(u);
+
+  reviewDrafts.delete(ctx.chat.id);
+
+  await ctx.reply(
+    [
+      'Ок. Начинаем сначала — с первой недели 🌿',
+      '',
+      'Завтра в 7:30 придёт утреннее сообщение.'
+    ].join('\n'),
+    persistentKeyboard(u)
+  );
+});
 /* ============================================================================
    HTTP server: healthcheck + telegraf webhook + yookassa webhook + success page
 ============================================================================ */
