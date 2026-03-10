@@ -5,6 +5,7 @@ const http = require('http');
 const cron = require('node-cron');
 const { Telegraf, Markup } = require('telegraf');
 const crypto = require('crypto');
+const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID;
 
 // ✅ YooKassa (safe require: бот не падает, даже если пакет не установился)
 let YooKassa = null;
