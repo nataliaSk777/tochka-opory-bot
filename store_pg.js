@@ -80,15 +80,21 @@ async function init() {
       text TEXT NOT NULL,
       program_type TEXT,
       current_day INT,
+      allow_public_use BOOLEAN,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  // миграция для старой таблицы reviews
+  await pool.query(`ALTER TABLE reviews ADD COLUMN IF NOT EXISTS allow_public_use BOOLEAN;`);
 
   await pool.query(`CREATE INDEX IF NOT EXISTS reviews_created_at_idx ON reviews (created_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS reviews_chat_id_idx ON reviews (chat_id);`);
 }
 
 function rowToUser(r) {
+  const awaitingCountry = !!r.awaiting_country_name;
+
   return {
     chatId: Number(r.chat_id),
     isActive: !!r.is_active,
@@ -110,7 +116,8 @@ function rowToUser(r) {
 
     // ✅ экстренная помощь по стране
     countryCode: r.country_code || null,
-    awaitingCountryName: !!r.awaiting_country_name,
+    awaitingCountryName: awaitingCountry,
+    awaitingCountryCode: awaitingCountry,
 
     // ✅ отзывы
     awaitingReview: !!r.awaiting_review,
@@ -125,6 +132,8 @@ async function getUser(chatId) {
 }
 
 async function upsertUser(u) {
+  const awaitingCountry = !!(u.awaitingCountryCode || u.awaitingCountryName);
+
   await pool.query(
     `INSERT INTO users (
         chat_id, is_active, program_type, current_day, support_step,
@@ -171,7 +180,7 @@ async function upsertUser(u) {
       !!u.awaitingReceiptEmail,
 
       u.countryCode ? String(u.countryCode) : null,
-      !!u.awaitingCountryName,
+      awaitingCountry,
 
       !!u.awaitingReview,
       !!u.reviewPostponed
@@ -208,6 +217,7 @@ async function ensureUser(chatId) {
 
     countryCode: null,
     awaitingCountryName: false,
+    awaitingCountryCode: false,
 
     awaitingReview: false,
     reviewPostponed: false
@@ -299,22 +309,33 @@ async function getDeliveryStatsByDay(sendKey) {
   return { sendKey: key, totalAll, sentAll, errorsAll, byKind };
 }
 
-async function addReview({ chatId, text, programType, currentDay }) {
+async function addReview({ chatId, text, programType, currentDay, allowPublicUse = null }) {
   const clean = String(text || '').trim();
   if (!clean) return null;
 
   const res = await pool.query(
-    `INSERT INTO reviews (chat_id, text, program_type, current_day)
-     VALUES ($1,$2,$3,$4)
+    `INSERT INTO reviews (chat_id, text, program_type, current_day, allow_public_use)
+     VALUES ($1,$2,$3,$4,$5)
      RETURNING id`,
     [
       String(chatId),
       clean,
       programType ? String(programType) : null,
-      currentDay != null ? Number(currentDay) : null
+      currentDay != null ? Number(currentDay) : null,
+      allowPublicUse == null ? null : !!allowPublicUse
     ]
   );
   return res.rows && res.rows[0] ? Number(res.rows[0].id) : null;
+}
+
+async function setReviewPublicPermission(reviewId, allowPublicUse) {
+  if (!reviewId) return;
+  await pool.query(
+    `UPDATE reviews
+     SET allow_public_use = $2
+     WHERE id = $1`,
+    [Number(reviewId), !!allowPublicUse]
+  );
 }
 
 async function countReviews() {
@@ -339,6 +360,7 @@ module.exports = {
   markDeliveryError,
   getDeliveryStatsByDay,
   addReview,
+  setReviewPublicPermission,
   countReviews,
   close
 };
